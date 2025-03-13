@@ -37,11 +37,11 @@ class PathsConfig:
 @dataclass
 class TrainingConfig:
     # 数据窗口与网络结构
-    WINDOW_SIZE: int = 6
+    WINDOW_SIZE: int = 5
     HIDDEN_DIM: int = 512
 
     # 训练超参数
-    NUM_EPOCHS: int = 1
+    NUM_EPOCHS: int = 500
     BATCH_SIZE: int = 32
     LEARNING_RATE: float = 2e-5
     WEIGHT_DECAY: float = 1e-5

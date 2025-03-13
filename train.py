@@ -29,6 +29,62 @@ from utils.dataset import PreprocessedDataset
 # --------------------------
 # 自定义训练函数（包含 NaN 检测与网络切换功能，记录每个 epoch 损失）
 # --------------------------
+def check_continuous_zeros_in_array(arr, threshold_fraction=0.8, min_continuous=2):
+    """
+    检查一维数组 arr 中零值所占比例以及连续零值的最大长度。
+    :param arr: 1D numpy array
+    :param threshold_fraction: 如果零值比例超过此阈值，则视为异常
+    :param min_continuous: 如果连续零值长度超过此值，则视为异常
+    :return: (fraction, max_run)
+    """
+    zeros = (arr == 0)
+    fraction = zeros.mean()
+    max_run = 0
+    current_run = 0
+    for z in zeros:
+        if z:
+            current_run += 1
+            if current_run > max_run:
+                max_run = current_run
+        else:
+            current_run = 0
+    return fraction, max_run
+
+
+def check_dataset(dataset, threshold_fraction=0.8, min_continuous=20):
+    """
+    检查数据集中每个样本的电机功率数据和 IMU 数据是否存在大量且连续的0值。
+    打印出有问题的样本和通道信息。
+    :param dataset: 一个实现 __getitem__ 返回字典的 PyTorch 数据集，
+                    其中必须包含 'power_window' 和 'imu_window' 键。
+    :param threshold_fraction: 零值比例阈值，默认0.8
+    :param min_continuous: 连续0值的最小长度阈值，默认2（你可根据实际窗口大小调整）
+    """
+    for i in range(len(dataset)):
+        sample = dataset[i]
+        # 检查电机功率数据：假设 shape (window_size, 8)
+        power_data = sample['power_window']
+        if isinstance(power_data, torch.Tensor):
+            power_data = power_data.numpy()
+        for ch in range(power_data.shape[1]):
+            frac, max_run = check_continuous_zeros_in_array(power_data[:, ch],
+                                                            threshold_fraction, min_continuous)
+            if frac >= threshold_fraction and max_run >= min_continuous:
+                print(
+                    f"Warning: Sample {i} - Motor power channel {ch} has {frac:.2f} zeros with a continuous run of {max_run}.")
+
+        # 检查 IMU 数据：假设 shape (window_size, 6)
+        imu_data = sample['imu_window']
+        if isinstance(imu_data, torch.Tensor):
+            imu_data = imu_data.numpy()
+        for ch in range(imu_data.shape[1]):
+            frac, max_run = check_continuous_zeros_in_array(imu_data[:, ch],
+                                                            threshold_fraction, min_continuous)
+            if frac >= threshold_fraction and max_run >= min_continuous:
+                print(
+                    f"Warning: Sample {i} - IMU channel {ch} has {frac:.2f} zeros with a continuous run of {max_run}.")
+
+
 def custom_train_model(model, loss_fn, train_loader, epochs=100, lr=1e-4):
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=cfg.training.WEIGHT_DECAY)
     model.train()
@@ -92,7 +148,7 @@ def main():
         gamma=cfg.training.GAMMA
     )
 
-    # 加载预处理后的数据集，并划分训练集和验证集（80% 训练，20% 验证）
+    # 加载预处理数据集
     full_dataset = PreprocessedDataset(
         features_file=cfg.paths.TRAIN_FEATURES_FILE,
         accel_file=cfg.paths.TRAIN_ACCEL_LABELS_FILE,
@@ -100,6 +156,12 @@ def main():
         thrust_file=cfg.paths.TRAIN_THRUST_LABELS_FILE,
         window_size=cfg.training.WINDOW_SIZE
     )
+
+    # 检查数据集中是否存在大量且连续的0值（电机功率和IMU数据）
+    print("开始检查数据集连续0值情况……")
+    check_dataset(full_dataset, threshold_fraction=0.8, min_continuous=8)
+    print("数据集检查完成。")
+
     split_ratio = 0.8
     train_size = int(len(full_dataset) * split_ratio)
     val_size = len(full_dataset) - train_size

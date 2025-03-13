@@ -39,3 +39,5 @@ class PreprocessedDataset:
             'accel': accel_combined,
             'thrust': thrust
         }
+#git status
+#git add .

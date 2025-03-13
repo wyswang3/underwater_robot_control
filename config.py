@@ -37,13 +37,13 @@ class PathsConfig:
 @dataclass
 class TrainingConfig:
     # 数据窗口与网络结构
-    WINDOW_SIZE: int = 5
-    HIDDEN_DIM: int = 256
+    WINDOW_SIZE: int = 6
+    HIDDEN_DIM: int = 512
 
     # 训练超参数
-    NUM_EPOCHS: int = 2
+    NUM_EPOCHS: int = 1
     BATCH_SIZE: int = 32
-    LEARNING_RATE: float = 1e-4
+    LEARNING_RATE: float = 2e-5
     WEIGHT_DECAY: float = 1e-5
     CLIP_GRAD_NORM: float = 1.0
     NUM_WORKERS: int = 4
@@ -55,8 +55,8 @@ class TrainingConfig:
 
 @dataclass
 class DeviceConfig:
-    # 设备选择：优先使用 CUDA（可通过环境变量 USE_CUDA 控制），否则使用 CPU
-    DEVICE: str = field(default_factory=lambda: "cuda" if os.environ.get("USE_CUDA", "1") == "1" and os.path.exists("/dev/nvidia0") else "cpu")
+    # 设备选择：优先使用第三张 GPU（可通过环境变量 USE_CUDA 控制），否则使用 CPU
+    DEVICE: str = field(default_factory=lambda: "cuda:1" if os.environ.get("USE_CUDA", "1") == "1" and os.path.exists("/dev/nvidia0") else "cpu")
 
 @dataclass
 class Config:

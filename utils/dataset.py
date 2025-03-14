@@ -39,5 +39,9 @@ class PreprocessedDataset:
             'accel': accel_combined,
             'thrust': thrust
         }
+
+#git checkout -b new-feature-branch
 #git status
 #git add .
+#git commit -m "添加了新的预处理改进及其他修改"
+#git push -u origin new-feature-branch

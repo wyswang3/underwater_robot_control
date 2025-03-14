@@ -16,13 +16,55 @@ from models.dynamics_net import (
     DirectMappingNet,
     HybridDynamicsModel,
     EnhancedDynamicsLoss,
-    validate_model
+
 )
 from utils.preprocessing import load_thrust_allocation_matrix
 
 # 假设数据集类 PreprocessedDataset 已经在 train.py 中定义，
 # 你可以直接从 train.py 导入或单独提取到 utils 模块中
 from utils.dataset import PreprocessedDataset
+
+
+def validate_model(model, loss_fn, val_loader):
+    """
+    对模型进行验证，返回在验证集上的平均损失 avg_loss。
+
+    :param model: 已训练的模型 (physics/e2e/hybrid)
+    :param loss_fn: 损失函数 (如 EnhancedDynamicsLoss)
+    :param val_loader: 验证集 DataLoader
+    :return: avg_loss (float), 验证集平均 loss
+    """
+    model.eval()  # 设置为评估模式
+    device = next(model.parameters()).device  # 取得模型参数所在设备
+
+    total_loss = 0.0
+    sample_count = 0
+
+    with torch.no_grad():
+        for batch in val_loader:
+            # 将 batch 中所有张量移动到相同的 device 上
+            for k in batch:
+                batch[k] = batch[k].to(device)
+
+            # 前向传播
+            outputs = model(batch['power_window'], batch['imu_window'])
+
+            # 计算损失
+            loss = loss_fn(outputs, batch)
+
+            # 累加加权损失
+            batch_size = batch['accel'].size(0)
+            total_loss += loss.item() * batch_size
+            sample_count += batch_size
+
+    avg_loss = total_loss / sample_count if sample_count > 0 else 0.0
+
+    # 如果需要再次切回训练模式，可加:
+    # model.train()
+
+    return avg_loss
+
+
 def main(args):
     device = torch.device(cfg.device.DEVICE)
 

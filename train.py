@@ -16,8 +16,7 @@ from utils.preprocessing import load_thrust_allocation_matrix
 from utils.visualization import plot_loss_curve, visualize_predictions
 from utils.dataset import PreprocessedDataset
 import evaluate  # 评估脚本
-#激活服务器虚拟环境：conda activate /home/furui/pzy/wys_lstm/wyswang3_env
-#cd underwater_robot_control/
+
 def check_continuous_zeros_in_array(arr, threshold_fraction=0.8, min_continuous=20):
     """
     检查一维数组 arr 中零值所占比例以及连续零值的最大长度。

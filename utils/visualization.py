@@ -4,7 +4,8 @@ import torch
 import os
 import matplotlib
 
-matplotlib.rcParams['font.sans-serif'] = ['DejaVu Sans']
+# 使用支持中文的字体（如 SimHei），避免中文字符缺失警告
+matplotlib.rcParams['font.sans-serif'] = ['SimHei']
 matplotlib.rcParams['font.family'] = 'sans-serif'
 matplotlib.rcParams['axes.unicode_minus'] = False
 
@@ -29,8 +30,11 @@ def plot_loss_curve(train_losses, val_losses=None, save_path=None):
     plt.legend()
     plt.grid(True)
     if save_path is not None:
+        # 自动创建保存目录
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
         plt.savefig(save_path)
     plt.show()
+    plt.close()
 
 
 def visualize_predictions(model, dataloader, device, num_samples=6, save_path=None):
@@ -43,7 +47,7 @@ def visualize_predictions(model, dataloader, device, num_samples=6, save_path=No
       - model: 训练好的模型（EnhancedPhysicsNet/DirectMappingNet/HybridDynamicsModel）
       - dataloader: 数据加载器 (DataLoader)，用于获取一个完整 batch 的数据
       - device: 模型所在设备 (torch.device)
-      - num_samples: 从 batch 中取出的样本数量（默认5）
+      - num_samples: 从 batch 中取出的样本数量（默认6）
       - save_path: 如果指定，则将图像保存到该路径
     """
     model.eval()
@@ -54,8 +58,10 @@ def visualize_predictions(model, dataloader, device, num_samples=6, save_path=No
             print("Visualization failed: DataLoader has no data!")
             return
 
+        # 将batch中所有张量移动到device上
         for k in batch:
             batch[k] = batch[k].to(device)
+
         outputs = model(batch['power_window'], batch['imu_window'])
         if isinstance(outputs, dict):
             preds = outputs.get('accel_pred', None)
@@ -78,27 +84,26 @@ def visualize_predictions(model, dataloader, device, num_samples=6, save_path=No
     predictions = predictions[:num_samples]
     targets = targets[:num_samples]
 
-    # 绘图：每个样本一个子图
-    plt.figure(figsize=(12, 4 * num_samples))
-    x_ticks = np.arange(dim_pred)  # 对应维度索引，例如 [0,1,2,3,4,5]
-    for i in range(num_samples):
+    # 使用subplots创建多个子图
+    fig, axes = plt.subplots(nrows=num_samples, ncols=1, figsize=(12, 4 * num_samples))
+    if num_samples == 1:
+        axes = [axes]  # 保证axes是列表
+    x_ticks = np.arange(dim_pred)  # 对应维度索引，例如 [0,1,...,dim_pred-1]
+    for i, ax in enumerate(axes):
         sample_pred = predictions[i]
         sample_target = targets[i]
         rmse = np.sqrt(np.mean((sample_pred - sample_target) ** 2))
-
-        plt.subplot(num_samples, 1, i + 1)
-        plt.plot(x_ticks, sample_target, label='Ground Truth', marker='o')
-        plt.plot(x_ticks, sample_pred, label='Prediction', marker='x')
-        plt.title(f"Sample {i + 1}: Prediction vs Ground Truth (RMSE: {rmse:.3f})")
-        plt.xlabel("Dimension")
-        plt.ylabel("Value")
-        plt.legend()
-        plt.grid(True)
+        ax.plot(x_ticks, sample_target, label='真实值', marker='o')
+        ax.plot(x_ticks, sample_pred, label='预测值', marker='x')
+        ax.set_title(f"样本 {i + 1}: 预测 vs 真实 (RMSE: {rmse:.3f})")
+        ax.set_xlabel("维度")
+        ax.set_ylabel("数值")
+        ax.legend()
+        ax.grid(True)
 
     plt.tight_layout()
     if save_path is not None:
-        save_dir = os.path.dirname(save_path)
-        if save_dir:
-            os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
         plt.savefig(save_path)
     plt.show()
+    plt.close()

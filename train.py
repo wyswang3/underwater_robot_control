@@ -16,7 +16,7 @@ from utils.preprocessing import load_thrust_allocation_matrix
 from utils.visualization import plot_loss_curve, visualize_predictions
 from utils.dataset import PreprocessedDataset
 import evaluate  # 评估脚本
-
+#激活服务器虚拟环境：conda activate /home/furui/pzy/wys_lstm/wyswang3_env
 def check_continuous_zeros_in_array(arr, threshold_fraction=0.8, min_continuous=20):
     """
     检查一维数组 arr 中零值所占比例以及连续零值的最大长度。
@@ -52,7 +52,7 @@ def check_dataset(dataset, threshold_fraction=0.8, min_continuous=20):
         if isinstance(imu_data, torch.Tensor):
             imu_data = imu_data.numpy()
 
-        # motor power channels
+        # 检查电机功率数据
         for ch in range(power_data.shape[1]):  # 8通道
             frac, max_run = check_continuous_zeros_in_array(power_data[:, ch],
                                                             threshold_fraction,
@@ -60,14 +60,13 @@ def check_dataset(dataset, threshold_fraction=0.8, min_continuous=20):
             if frac >= threshold_fraction and max_run >= min_continuous:
                 print(f"[WARN] Sample {i}, MotorPower ch={ch}, frac={frac:.2f}, max_run={max_run}")
 
-        # IMU channels
+        # 检查 IMU 数据
         for ch in range(imu_data.shape[1]):  # 6通道
             frac, max_run = check_continuous_zeros_in_array(imu_data[:, ch],
                                                             threshold_fraction,
                                                             min_continuous)
             if frac >= threshold_fraction and max_run >= min_continuous:
                 print(f"[WARN] Sample {i}, IMU ch={ch}, frac={frac:.2f}, max_run={max_run}")
-
 
 def custom_train_model(model, loss_fn, train_loader,
                        epochs=100, lr=1e-4, weight_decay=1e-5,
@@ -88,23 +87,22 @@ def custom_train_model(model, loss_fn, train_loader,
         sample_count = 0
 
         for batch in train_loader:
-            # 移动 batch 到 device
+            # 将 batch 中的所有项移动到 device
             for k in batch:
                 batch[k] = batch[k].to(device)
 
-            # 前向
+            # 前向传播
             outputs = model(batch['power_window'], batch['imu_window'])
             loss    = loss_fn(outputs, batch)
 
-            # 如果 loss 为 NaN
+            # 若 loss 为 NaN 则切换至端到端模式，并重置优化器
             if torch.isnan(loss):
                 if not switched:
                     print("检测到 NaN, 切换到端到端模式 & 重置优化器")
                     model.switch_to_e2e()
                     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
                     switched = True
-                # 跳过当前batch
-                continue
+                continue  # 跳过当前 batch
 
             optimizer.zero_grad()
             loss.backward()
@@ -115,7 +113,7 @@ def custom_train_model(model, loss_fn, train_loader,
             total_loss += loss.item() * batch_size
             sample_count += batch_size
 
-        avg_loss = total_loss / sample_count if sample_count>0 else 0.0
+        avg_loss = total_loss / sample_count if sample_count > 0 else 0.0
         epoch_losses.append(avg_loss)
         print(f"Epoch[{epoch+1}/{epochs}] - Loss: {avg_loss:.6f}")
 
@@ -142,15 +140,14 @@ def validate_model(model, loss_fn, val_loader):
             total_loss += loss.item() * batch_size
             sample_count += batch_size
 
-    avg_loss = total_loss / sample_count if sample_count>0 else 0.0
+    avg_loss = total_loss / sample_count if sample_count > 0 else 0.0
     return avg_loss
 
-
 def main():
-    # Windows下多进程 DataLoader，需 spawn
+    # Windows 下多进程 DataLoader 需使用 spawn 启动方式
     multiprocessing.set_start_method('spawn', force=True)
 
-    # 1) 读取 config
+    # 1) 读取配置
     cfg = Config()
     cfg.print_config()
 
@@ -166,22 +163,22 @@ def main():
     physics_net = EnhancedPhysicsNet(
         thrust_matrix=thrust_matrix,
         window_size=cfg.training.WINDOW_SIZE,
-        hidden_dim=cfg.training.HIDDEN_DIM
+        hidden_dim=cfg.training.PHYSICS_HIDDEN_DIM
     )
     e2e_net = DirectMappingNet(
         window_size=cfg.training.WINDOW_SIZE,
-        hidden_dim=cfg.training.HIDDEN_DIM
+        hidden_dim=cfg.training.E2E_HIDDEN_DIM
     )
     model = HybridDynamicsModel(physics_net, e2e_net).to(device)
 
-    # 4) 损失函数
+    # 4) 定义损失函数
     criterion = EnhancedDynamicsLoss(
         alpha=cfg.training.ALPHA,
         beta=cfg.training.BETA,
         gamma=cfg.training.GAMMA
     )
 
-    # 5) 加载数据集
+    # 5) 加载预处理后的数据集
     full_dataset = PreprocessedDataset(
         features_file=cfg.paths.TRAIN_FEATURES_FILE,
         accel_file=cfg.paths.TRAIN_ACCEL_LABELS_FILE,
@@ -190,14 +187,14 @@ def main():
         window_size=cfg.training.WINDOW_SIZE
     )
 
-    # (可选) 检查零值
+    # (可选) 检查数据集中的连续零值情况
     print("=== 检查数据集零值情况 ===")
     check_dataset(full_dataset, threshold_fraction=0.8, min_continuous=8)
     print("数据检查结束.")
 
     # 6) 划分训练/验证集
     split_ratio = 0.8
-    train_size = int(len(full_dataset)*split_ratio)
+    train_size = int(len(full_dataset) * split_ratio)
     val_size   = len(full_dataset) - train_size
     train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
 
@@ -207,14 +204,14 @@ def main():
         shuffle=True,
         num_workers=cfg.training.NUM_WORKERS
     )
-    val_loader   = torch.utils.data.DataLoader(
+    val_loader = torch.utils.data.DataLoader(
         val_dataset,
         batch_size=cfg.training.BATCH_SIZE,
         shuffle=False,
         num_workers=cfg.training.NUM_WORKERS
     )
 
-    # 7) 训练
+    # 7) 开始训练
     print("=== 开始训练 ===")
     model, train_losses = custom_train_model(
         model, criterion, train_loader,
@@ -229,28 +226,24 @@ def main():
     torch.save(model.state_dict(), checkpoint_path)
     print(f"模型已保存 -> {checkpoint_path}")
 
-    # 9) 训练损失可视化
-    from utils.visualization import plot_loss_curve
+    # 9) 训练损失曲线可视化
     loss_plot_path = os.path.join(cfg.paths.SPLITS_DIR, "training_loss.png")
     plot_loss_curve(train_losses, save_path=loss_plot_path)
     print(f"训练损失曲线已保存 -> {loss_plot_path}")
 
-    # (可选) 在训练脚本里做一次验证
+    # 10) 验证集评估
     val_loss = validate_model(model, criterion, val_loader)
     print(f"Validation Loss (final): {val_loss:.6f}")
 
-    # 10) 调用评估脚本
+    # 11) 调用评估脚本
     eval_args = argparse.Namespace(checkpoint=checkpoint_path)
     print("=== 开始评估 ===")
-    import evaluate  # 如果上面已 import，可省略
     evaluate.main(eval_args)
 
-    # 11) 预测可视化
-    from utils.visualization import visualize_predictions
+    # 12) 预测结果可视化
     pred_plot_path = os.path.join(cfg.paths.SPLITS_DIR, "prediction_comparison.png")
     visualize_predictions(model, val_loader, device, save_path=pred_plot_path)
     print(f"预测可视化已保存 -> {pred_plot_path}")
-
 
 if __name__ == "__main__":
     main()

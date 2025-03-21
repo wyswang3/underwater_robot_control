@@ -1,8 +1,8 @@
-#evaluate.py
+# evaluate.py
 import os
 import torch
 import numpy as np
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 import argparse
 
 # --------------------------
@@ -16,7 +16,6 @@ from models.dynamics_net import (
     DirectMappingNet,
     HybridDynamicsModel,
     EnhancedDynamicsLoss,
-
 )
 from utils.preprocessing import load_thrust_allocation_matrix
 
@@ -91,11 +90,11 @@ def main(args):
     physics_net = EnhancedPhysicsNet(
         thrust_matrix,
         window_size=cfg.training.WINDOW_SIZE,
-        hidden_dim=cfg.training.HIDDEN_DIM
+        hidden_dim=cfg.training.PHYSICS_HIDDEN_DIM
     )
     e2e_net = DirectMappingNet(
         window_size=cfg.training.WINDOW_SIZE,
-        hidden_dim=cfg.training.HIDDEN_DIM
+        hidden_dim=cfg.training.E2E_HIDDEN_DIM
     )
     model = HybridDynamicsModel(physics_net, e2e_net)
     model.to(device)
@@ -133,10 +132,3 @@ def main(args):
     print("开始评估……")
     avg_loss = validate_model(model, criterion, eval_loader)
     print("评估完成，平均总损失：{:.6f}".format(avg_loss))
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="模型评估")
-    parser.add_argument("--checkpoint", type=str, default="model_checkpoint.pt", help="模型检查点路径")
-    parser.add_argument("--mode", type=str, default="e2e", help="评估模式：physics 或 e2e")
-    args = parser.parse_args()
-    main(args)

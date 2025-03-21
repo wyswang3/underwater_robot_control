@@ -1,27 +1,23 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-from math import sqrt
 
-# 从 config 导入配置 (可选，如果你需要使用 cfg.device 等参数)
-from config import Config
-cfg = Config()
 
-######################################################
-# Swish 激活函数
-######################################################
+#############################################
+# 基础激活函数及辅助函数
+#############################################
 class Swish(nn.Module):
+    """自研Swish激活函数，提供平滑非线性"""
+
     def forward(self, x):
         return x * torch.sigmoid(x)
 
-######################################################
-# skew_symmetric 函数，用于构造歪对称矩阵
-######################################################
+
 def skew_symmetric(v):
     """
-    v: (batch,3) 向量
-    return: (batch,3,3) 歪对称矩阵
+    构造歪对称矩阵
+    v: (B,3) 向量
+    return: (B,3,3) 歪对称矩阵
     """
     B = v.shape[0]
     vx, vy, vz = v[:, 0], v[:, 1], v[:, 2]
@@ -30,260 +26,84 @@ def skew_symmetric(v):
         zeros, -vz, vy,
         vz, zeros, -vx,
         -vy, vx, zeros
-    ], dim=1).view(B,3,3)
+    ], dim=1).view(B, 3, 3)
     return mat
 
-######################################################
-# SPDMatrixNet (对称正定矩阵)
-######################################################
+
+#############################################
+# 矩阵生成模块
+#############################################
 class SPDMatrixNet(nn.Module):
-    """
-    输出对称正定矩阵: SPD = L*L^T
-    L 的下三角由全连接层产生 (size*(size+1)//2),
-    对角元素 softplus+eps，确保正定。
-    """
+    """增强型对称正定矩阵生成网络"""
+
     def __init__(self, input_dim, size, diag_eps=1e-4):
         super().__init__()
         self.size = size
         self.diag_eps = diag_eps
         self.fc = nn.Sequential(
-            nn.Linear(input_dim, size*(size+1)//2),
+            nn.Linear(input_dim, 256),  # 增加隐藏层
+            Swish(),
+            nn.LayerNorm(256),
+            nn.Linear(256, size * (size + 1) // 2),
             nn.Tanh()
         )
+        # 参数初始化
+        for layer in self.fc:
+            if isinstance(layer, nn.Linear):
+                nn.init.kaiming_normal_(layer.weight, nonlinearity='linear')
+                nn.init.zeros_(layer.bias)
 
     def forward(self, x):
-        B = x.size(0)
+        B = x.shape[0]
         tril_elements = self.fc(x)  # (B, size*(size+1)//2)
-        L = torch.zeros(B, self.size, self.size, device=x.device, dtype=x.dtype)
         indices = torch.tril_indices(self.size, self.size)
+        L = torch.zeros(B, self.size, self.size, device=x.device)
         L[:, indices[0], indices[1]] = tril_elements
-
-        diag = L.diagonal(dim1=1, dim2=2)
-        diag = F.softplus(diag) + self.diag_eps
-        # 用对角替换
+        diag = F.softplus(L.diagonal(dim1=1, dim2=2)) + self.diag_eps
+        # 替换对角线部分
         L = L - torch.diag_embed(L.diagonal(dim1=1, dim2=2)) + torch.diag_embed(diag)
+        return L @ L.transpose(1, 2)
 
-        return L @ L.transpose(1,2)
 
-######################################################
-# DiagonalMatrixNet (对角矩阵)
-######################################################
 class DiagonalMatrixNet(nn.Module):
-    """
-    输出对角矩阵( size x size ),
-    对角元 = exp(linear) 保证正值
-    """
+    """对角矩阵生成网络，保证对角元为正"""
+
     def __init__(self, input_dim, size):
         super().__init__()
         self.fc = nn.Linear(input_dim, size)
+        nn.init.kaiming_normal_(self.fc.weight, nonlinearity='linear')
+        nn.init.zeros_(self.fc.bias)
 
     def forward(self, x):
         diag_vals = torch.exp(self.fc(x))
         return torch.diag_embed(diag_vals)
 
-######################################################
-# SymmetricMatrixNet (对称矩阵)
-######################################################
-class SymmetricMatrixNet(nn.Module):
-    """
-    输出对称矩阵( size x size ),
-    主对角不要求 > 0，也不保证正定
-    """
-    def __init__(self, input_dim, size):
-        super().__init__()
-        self.size = size
-        self.fc = nn.Linear(input_dim, size*(size+1)//2)
 
-    def forward(self, x):
-        B = x.size(0)
-        triup = self.fc(x)
-        M = torch.zeros(B, self.size, self.size, device=x.device, dtype=x.dtype)
-        ind = torch.triu_indices(self.size, self.size)
-        M[:, ind[0], ind[1]] = triup
-        M = M + M.transpose(1,2) - torch.diag_embed(M.diagonal(dim1=1,dim2=2))
-        return M
-
-######################################################
-# 动力学方程约束层
-######################################################
-class DynamicsConstraintLayer(nn.Module):
-    """
-    6 自由度方程:
-    tau = [ M  0 ] [a_linear] + C(v)*v + D*v
-          [ 0  J ] [a_angular]
-    """
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, tau, M, J, D, imu_window):
-        B = tau.size(0)
-        # 取最后帧速度
-        v_linear = imu_window[:, -1, :3]
-        omega    = imu_window[:, -1, 3:]
-        v_6 = torch.cat([v_linear, omega], dim=1)  # (B,6)
-
-        # 组装 惯性矩阵
-        inertia_block = torch.zeros(B,6,6, device=tau.device, dtype=tau.dtype)
-        inertia_block[:, :3, :3] = M
-        inertia_block[:, 3:, 3:] = J
-
-        # 科氏力C
-        C = torch.zeros_like(inertia_block)
-        C[:, :3, 3:] = -skew_symmetric(v_linear)
-        C[:, 3:, 3:] = -skew_symmetric(omega)
-
-        # 合力
-        cdv = (C + D) @ v_6.unsqueeze(-1)  # (B,6,1)
-        net_force = tau.unsqueeze(-1) - cdv  # (B,6,1)
-
-        # 求 a_6 = inertia^-1 * net_force
-        a_6 = torch.linalg.solve(inertia_block, net_force)  # (B,6,1)
-        return a_6.squeeze(-1)
-
-######################################################
-# 三层编码的物理网络
-######################################################
-class EnhancedPhysicsNet(nn.Module):
-    """
-    三层编码: Linear->Swish->LayerNorm×3
-    + thrust_nets, mass_net, inertia_net, damping_net
-    """
-    def __init__(self, thrust_matrix, window_size=5, hidden_dim=256):
-        super().__init__()
-        self.register_buffer('thrust_matrix', thrust_matrix)
-
-        input_dim = (8+6)*window_size
-        # 三层 (Linear->Swish->LayerNorm)
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            Swish(),
-            nn.LayerNorm(hidden_dim),
-
-            nn.Linear(hidden_dim, hidden_dim),
-            Swish(),
-            nn.LayerNorm(hidden_dim),
-
-            nn.Linear(hidden_dim, hidden_dim),
-            Swish(),
-            nn.LayerNorm(hidden_dim)
-        )
-
-        # thrust_nets
-        self.thrust_nets = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(window_size, 32),
-                Swish(),
-                nn.Linear(32,1)
-            ) for _ in range(8)
-        ])
-
-        # 质量矩阵,惯性矩阵,阻尼矩阵
-        self.mass_net     = SPDMatrixNet(hidden_dim, 3)
-        self.inertia_net  = SPDMatrixNet(hidden_dim, 3)
-        self.damping_net  = DiagonalMatrixNet(hidden_dim, 6)
-        self.physics_layer= DynamicsConstraintLayer()
-
-        self.window_size = window_size
-        self.hidden_dim  = hidden_dim
-
-    def forward(self, power_window, imu_window):
-        B, T, _ = power_window.shape
-        # 拼接并flatten
-        x = torch.cat([power_window, imu_window], dim=-1).flatten(1)
-        feat = self.encoder(x)
-
-        # thrust_nets
-        motor_thrusts = []
-        for i in range(8):
-            seq = power_window[:, :, i]  # (B,T)
-            thrust_i = self.thrust_nets[i](seq).squeeze(-1)  # (B,)
-            motor_thrusts.append(thrust_i)
-        motor_thrusts = torch.stack(motor_thrusts, dim=1) # (B,8)
-
-        # 计算 tau
-        tau = (self.thrust_matrix @ motor_thrusts.unsqueeze(-1)).squeeze(-1)
-
-        # mass, inertia, damping
-        M = self.mass_net(feat)
-        J = self.inertia_net(feat)
-        D = self.damping_net(feat)
-
-        # 动力学层
-        accel_pred = self.physics_layer(tau, M, J, D, imu_window)
-
-        return {
-            'tau': tau,
-            'mass_matrix': M,
-            'inertia_matrix': J,
-            'damping_matrix': D,
-            'accel_pred': accel_pred
-        }
-
-######################################################
-# 增强型损失函数
-######################################################
-class EnhancedDynamicsLoss(nn.Module):
-    """
-    1. 加速度误差
-    2. 推力损失
-    3. 正则(对 mass/inertia行列式)
-    """
-    def __init__(self, alpha=1.0, beta=0.1, gamma=0.01):
-        super().__init__()
-        self.alpha = alpha
-        self.beta  = beta
-        self.gamma = gamma
-
-    def forward(self, outputs, targets):
-        if isinstance(outputs, dict):
-            accel_pred = outputs['accel_pred']
-            tau_pred   = outputs.get('tau', None)
-            # thrust loss
-            thrust_loss = F.mse_loss(tau_pred, targets['thrust']) if tau_pred is not None else 0.0
-
-            # 正则
-            if 'mass_matrix' in outputs and 'inertia_matrix' in outputs:
-                M_det = torch.det(outputs['mass_matrix']).clamp_min(1e-7)
-                J_det = torch.det(outputs['inertia_matrix']).clamp_min(1e-7)
-                reg_loss = -(torch.log(M_det).mean() + torch.log(J_det).mean())
-            else:
-                reg_loss = 0.0
-
-        else:
-            # 端到端输出
-            accel_pred = outputs
-            thrust_loss= 0.0
-            reg_loss   = 0.0
-
-        accel_loss = F.mse_loss(accel_pred, targets['accel'])
-        total_loss = accel_loss + self.alpha*thrust_loss + self.beta*reg_loss
-        return total_loss
-
-######################################################
-# 端到端网络(三层)
-######################################################
+#############################################
+# 端到端映射网络（e2e 网络）
+#############################################
 class DirectMappingNet(nn.Module):
+    """
+    简单的端到端网络，用于直接从输入到输出的映射
+    输入维度：(8 + 6) * window_size
+    输出维度：6（如加速度或其他6自由度量）
+    """
+
     def __init__(self, window_size=5, hidden_dim=256):
         super().__init__()
         self.window_size = window_size
-        self.input_dim   = (8+6)*window_size
-
-        # 三层 (Linear->ReLU->LayerNorm)
+        self.input_dim = (8 + 6) * window_size
         self.encoder_layers = nn.ModuleList([
             nn.Linear(self.input_dim, hidden_dim),
             nn.ReLU(),
             nn.LayerNorm(hidden_dim),
-
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.LayerNorm(hidden_dim),
-
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.LayerNorm(hidden_dim)
         ])
-
-        # decoder
         self.decoder_layers = nn.ModuleList([
             nn.Linear(hidden_dim, 64),
             nn.ReLU(),
@@ -292,43 +112,169 @@ class DirectMappingNet(nn.Module):
 
     def forward(self, power_window, imu_window):
         x = torch.cat([power_window, imu_window], dim=-1).flatten(1)
-
-        # 依次通过 encoder_layers, 每 3个(Linear,ReLU,LayerNorm)
+        # 顺序通过 encoder_layers (每3个为一组)
         idx = 0
         while idx < len(self.encoder_layers):
             linear = self.encoder_layers[idx]
-            activation = self.encoder_layers[idx+1]
-            norm = self.encoder_layers[idx+2]
-
-            x = linear(x)
-            x = activation(x)
-            x = norm(x)
+            activation = self.encoder_layers[idx + 1]
+            norm = self.encoder_layers[idx + 2]
+            x = norm(activation(linear(x)))
             idx += 3
-
-        # decoder
+        # decoder部分
         for layer in self.decoder_layers:
             x = layer(x)
-
         return x
 
-######################################################
-# 混合网络
-######################################################
+
+#############################################
+# 增强物理约束网络
+#############################################
+class EnhancedPhysicsNet(nn.Module):
+    """增强物理约束网络，用物理先验辅助学习"""
+
+    def __init__(self, thrust_matrix, window_size=5, hidden_dim=512):
+        super().__init__()
+        self.register_buffer('thrust_matrix', thrust_matrix)
+        input_dim = (8 + 6) * window_size
+
+        # 增强编码器
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            Swish(),
+            nn.LayerNorm(hidden_dim),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim, hidden_dim),
+            Swish(),
+            nn.LayerNorm(hidden_dim)
+        )
+
+        # 改进推力预测网络，为每个电机构建独立子网络
+        self.thrust_nets = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(window_size, 64),
+                Swish(),
+                nn.Linear(64, 32),
+                Swish(),
+                nn.Linear(32, 1)
+            ) for _ in range(8)
+        ])
+
+        # 物理参数矩阵生成网络
+        self.mass_net = SPDMatrixNet(hidden_dim, 3)
+        self.inertia_net = SPDMatrixNet(hidden_dim, 3)
+        self.damping_net = DiagonalMatrixNet(hidden_dim, 6)
+
+        # 可学习的正则系数，确保矩阵数值稳定
+        self.reg_scale = nn.Parameter(torch.tensor([1e-4]))
+
+    def forward(self, power_window, imu_window):
+        B = power_window.shape[0]
+        # 拼接并展平输入
+        x = torch.cat([power_window, imu_window], dim=-1).flatten(1)
+        feat = self.encoder(x)
+
+        # 推力预测：对每个电机分别进行预测
+        motor_thrusts = torch.stack([
+            net(power_window[:, :, i]) for i, net in enumerate(self.thrust_nets)
+        ], dim=1)  # motor_thrusts 的形状为 (B, 8, 1)
+        # 直接进行矩阵乘法，不需要 unsqueeze
+        tau = (self.thrust_matrix @ motor_thrusts).squeeze(-1)
+
+        # 后续部分保持不变
+        M = self.mass_net(feat) + self.reg_scale * torch.eye(3, device=feat.device)
+        J = self.inertia_net(feat) + self.reg_scale * torch.eye(3, device=feat.device)
+        D = self.damping_net(feat)
+        v_linear = imu_window[:, -1, :3]
+        omega = imu_window[:, -1, 3:]
+        v_6 = torch.cat([v_linear, omega], dim=1)
+        inertia_block = torch.zeros(B, 6, 6, device=feat.device)
+        inertia_block[:, :3, :3] = M
+        inertia_block[:, 3:, 3:] = J
+        inertia_block += 1e-6 * torch.eye(6, device=inertia_block.device)
+        C = torch.zeros_like(inertia_block)
+        C[:, :3, 3:] = -skew_symmetric(v_linear)
+        C[:, 3:, 3:] = -skew_symmetric(omega)
+        accel_pred = torch.linalg.solve(
+            inertia_block,
+            (tau.unsqueeze(-1) - (C + D) @ v_6.unsqueeze(-1))
+        ).squeeze(-1)
+
+        return {'accel_pred': accel_pred, 'M': M, 'J': J}
+
+
+#############################################
+# 混合模型：物理约束与端到端融合
+#############################################
 class HybridDynamicsModel(nn.Module):
     """
-    在发现NaN或需要时切换物理->端到端
+    门控混合模型，通过动态门控机制融合物理网络与端到端网络的输出
     """
+
     def __init__(self, physics_net, e2e_net):
         super().__init__()
         self.physics_net = physics_net
-        self.e2e_net     = e2e_net
-        self.active_net  = 'physics'  # 默认物理模式
+        self.e2e_net = e2e_net
+        # 假设物理网络编码器输出维度为 hidden_dim，取前 64 维作为特征，再加上物理预测（6维），门控输入总维度 70
+        self.gate = nn.Sequential(
+            nn.Linear(70, 64),
+            Swish(),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
 
     def forward(self, power_window, imu_window):
-        if self.active_net == 'physics':
-            return self.physics_net(power_window, imu_window)
-        else:
-            return self.e2e_net(power_window, imu_window)
+        physics_out = self.physics_net(power_window, imu_window)
+        e2e_out = self.e2e_net(power_window, imu_window)
+        # 提取物理网络编码器中部分特征（前64维）
+        physics_features = self.physics_net.encoder(
+            torch.cat([power_window, imu_window], dim=-1).flatten(1)
+        )[:, :64]
+        # 拼接特征与物理预测加速度，作为门控输入
+        gate_input = torch.cat([physics_features, physics_out['accel_pred']], dim=1)
+        gate_value = self.gate(gate_input)
+        # 融合输出
+        out = gate_value * physics_out['accel_pred'] + (1 - gate_value) * e2e_out
+        return out
 
-    def switch_to_e2e(self):
-        self.active_net = 'e2e'
+
+#############################################
+# 增强型损失函数
+#############################################
+class EnhancedDynamicsLoss(nn.Module):
+    """
+    增强型损失函数：
+      1. 加速度误差
+      2. 推力损失（如果可用）
+      3. 矩阵正则项（对生成的质量矩阵 M 与惯性矩阵 J 的行列式进行正则化）
+    """
+
+    def __init__(self, alpha=1.0, beta=0.1, gamma=0.01):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+
+    def forward(self, outputs, targets):
+        # 当 outputs 为 dict 时（物理约束模式）
+        if isinstance(outputs, dict):
+            accel_pred = outputs.get('accel_pred')
+            tau_pred = outputs.get('tau', None)
+            # 推力损失：如果存在 tau_pred 且目标中包含 'thrust'
+            thrust_loss = F.mse_loss(tau_pred, targets['thrust']) if (
+                        tau_pred is not None and 'thrust' in targets) else 0.0
+            # 正则：对质量矩阵 M 和惯性矩阵 J 的行列式求对数并取负
+            if 'M' in outputs and 'J' in outputs:
+                M_det = torch.det(outputs['M']).clamp_min(1e-7)
+                J_det = torch.det(outputs['J']).clamp_min(1e-7)
+                reg_loss = -(torch.log(M_det).mean() + torch.log(J_det).mean())
+            else:
+                reg_loss = 0.0
+        else:
+            # 端到端模式下，仅计算加速度误差
+            accel_pred = outputs
+            thrust_loss = 0.0
+            reg_loss = 0.0
+
+        accel_loss = F.mse_loss(accel_pred, targets['accel'])
+        total_loss = accel_loss + self.alpha * thrust_loss + self.beta * reg_loss
+        return total_loss

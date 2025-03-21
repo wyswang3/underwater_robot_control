@@ -5,7 +5,6 @@ import logging
 from openpyxl import load_workbook
 from scipy.optimize import curve_fit
 from scipy.interpolate import interp1d
-from scipy.signal import butter, lfilter
 from scipy.integrate import trapezoid
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -92,11 +91,8 @@ def extract_imu_time_in_seconds(timestamp_series):
     解析 IMU 数据的 Timestamp（完整日期时间字符串），只提取分钟和秒部分，转换为总秒数。
     例如 "2024-06-18 04:31:33.500" 提取后为 31*60 + 33.5 = 1893.5 秒。
     """
-    # 尝试解析为 datetime
     dt_series = pd.to_datetime(timestamp_series, format='%Y-%m-%d %H:%M:%S.%f', errors='coerce')
-    # 如果解析失败，尝试不带微秒
     dt_series = dt_series.fillna(pd.to_datetime(timestamp_series, format='%Y-%m-%d %H:%M:%S', errors='coerce'))
-    # 提取分钟和秒（忽略小时、日期等）
     return dt_series.apply(lambda dt: dt.minute * 60 + dt.second + dt.microsecond / 1e6 if pd.notnull(dt) else np.nan)
 
 def align_motor_imu(power_path, imu_path):
@@ -106,7 +102,6 @@ def align_motor_imu(power_path, imu_path):
     对于 IMU 数据，假设 Timestamp 为完整日期时间格式。
     返回对齐后的 DataFrame。
     """
-    import logging
     if not os.path.exists(power_path):
         raise FileNotFoundError(f"电机功率文件不存在: {os.path.abspath(power_path)}")
     if not os.path.exists(imu_path):
@@ -123,13 +118,11 @@ def align_motor_imu(power_path, imu_path):
         logging.debug(f"[DEBUG] imu_df 原始 shape={imu_df.shape}")
         logging.debug(f"[DEBUG] imu_df head:\n{imu_df.head(3).to_string(index=False)}")
 
-        # 检查必须的列是否存在
         if 'Timestamp' not in power_df.columns:
             raise ValueError("电机 CSV 中缺少 'Timestamp' 列")
         if 'Timestamp' not in imu_df.columns:
             raise ValueError("IMU CSV 中缺少 'Timestamp' 列")
 
-        # 分别解析时间戳为相对秒数（只提取分钟和秒）
         logging.debug("[DEBUG] 解析电机数据时间戳为秒数...")
         power_df['time_in_seconds'] = power_df['Timestamp'].apply(parse_motor_timestamp)
         logging.debug(f"[DEBUG] 电机数据时间示例: {power_df['time_in_seconds'].head(3).tolist()}")
@@ -138,7 +131,6 @@ def align_motor_imu(power_path, imu_path):
         imu_df['time_in_seconds'] = extract_imu_time_in_seconds(imu_df['Timestamp'])
         logging.debug(f"[DEBUG] IMU 数据时间示例: {imu_df['time_in_seconds'].head(3).tolist()}")
 
-        # 删除解析失败的行
         power_df.dropna(subset=['time_in_seconds'], inplace=True)
         imu_df.dropna(subset=['time_in_seconds'], inplace=True)
         logging.debug(f"[DEBUG] dropna后 power_df shape={power_df.shape}, imu_df shape={imu_df.shape}")
@@ -150,7 +142,7 @@ def align_motor_imu(power_path, imu_path):
             power_df, imu_df,
             on='time_in_seconds',
             direction='nearest',
-            tolerance=0.5  # tolerance单位为秒，根据数据采样率调整
+            tolerance=0.5
         )
         logging.debug(f"[DEBUG] merged shape={merged.shape}")
         if not merged.empty:
@@ -160,17 +152,15 @@ def align_motor_imu(power_path, imu_path):
     except Exception as e:
         raise RuntimeError(f"对齐电机功率与IMU数据失败: {e}")
 
-
-
 ############################
 # 3) 常用函数
 ############################
 def butter_lowpass_filter(data, cutoff=5, fs=50, order=4):
     from scipy.signal import butter, lfilter
-    nyq = 0.5*fs
-    normal_cutoff = cutoff/nyq
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
     b, a = butter(order, normal_cutoff, btype='low', analog=False)
-    return lfilter(b,a,data)
+    return lfilter(b, a, data)
 
 def apply_lowpass_filter(df, cols, cutoff=5, fs=50, order=4):
     for col in cols:
@@ -179,7 +169,7 @@ def apply_lowpass_filter(df, cols, cutoff=5, fs=50, order=4):
     return df
 
 def convert_accel_units(df, accel_cols=['AccX','AccY','AccZ']):
-    df[accel_cols] = df[accel_cols]*9.80665
+    df[accel_cols] = df[accel_cols] * 9.80665
     return df
 
 def load_thrust_allocation_matrix(matrix_path=None):
@@ -191,11 +181,11 @@ def load_thrust_allocation_matrix(matrix_path=None):
     else:
         T = np.array([
             [0.7071, 0.7071, -0.7071, -0.7071,   0,     0,     0,     0],
-            [-0.7071,0.7071, -0.7071, 0.7071,    0,     0,     0,     0],
-            [0,      0,       0,       0,       -1,     1,     1,    -1],
-            [0,      0,       0,       0,        0.218, 0.218,-0.218,-0.218],
-            [0,      0,       0,       0,        0.12, -0.12,  0.12, -0.12],
-            [-0.1888,0.1888,  0.1888, -0.1888,   0,     0,     0,     0]
+            [-0.7071, 0.7071, -0.7071, 0.7071,    0,     0,     0,     0],
+            [0,       0,       0,       0,       -1,     1,     1,    -1],
+            [0,       0,       0,       0,        0.218, 0.218,-0.218,-0.218],
+            [0,       0,       0,       0,        0.12, -0.12, 0.12, -0.12],
+            [-0.1888, 0.1888,  0.1888, -0.1888,   0,     0,     0,     0]
         ])
     if T.shape != (6,8):
         raise ValueError(f"推力分配矩阵应为 6x8, 当前形状={T.shape}")
@@ -212,9 +202,8 @@ def create_sequences(df, input_cols, label_cols_acc, label_cols_thrust,
     logging.debug(f"[DEBUG] 准备进行时间窗口切分: window_size={window_size}, dt={dt}, step={step}")
     feats, accs, thrs, vels, ang_accels = [], [], [], [], []
 
-    for i in range(0, len(df)-window_size+1, step):
+    for i in range(0, len(df) - window_size + 1, step):
         window = df.iloc[i:i+window_size]
-        # 如果窗口内有NaN, 跳过
         if window.isnull().any().any():
             continue
 
@@ -225,11 +214,11 @@ def create_sequences(df, input_cols, label_cols_acc, label_cols_thrust,
         motor_thrusts = np.array(motor_thrusts, dtype=np.float32)
         tau = thrust_matrix @ motor_thrusts
 
-        time_points = np.arange(window_size)*dt
+        time_points = np.arange(window_size) * dt
         acc_window = window[label_cols_acc].values
         vel_window = trapezoid(acc_window, x=time_points, axis=0)
 
-        gyro_cols = ['AsX','AsY','AsZ']
+        gyro_cols = ['AsX', 'AsY', 'AsZ']
         gyro_window = window[gyro_cols].values
         ang_accel = compute_angular_acceleration(gyro_window, dt)
         ang_accel_label = ang_accel[-1]
@@ -265,14 +254,14 @@ def full_pipeline(config):
     logging.info("加载并拟合推力测试数据...")
     thrust_df = load_thrust_data(config['thrust_path'])
     popt = fit_thrust_model(thrust_df)
-    if popt is None or len(popt)<2:
+    if popt is None or len(popt) < 2:
         raise RuntimeError("拟合推力模型失败: popt无效 (None 或长度<2)")
 
-    alpha,beta = popt
+    alpha, beta = popt
     logging.info(f"拟合得 alpha={alpha:.4f}, beta={beta:.4f}")
 
     def thrust_interp_func(power):
-        return alpha*(power**beta)
+        return alpha * (power ** beta)
 
     # 3) 对齐电机功率与 IMU
     logging.info("对齐电机功率与IMU数据...")
@@ -289,12 +278,12 @@ def full_pipeline(config):
     logging.info("插值得到电机推力...")
     motor_cols = [f'Motor{i}_Power' for i in range(1,9)]
     for col in motor_cols:
-        thr_col = col.replace('Power','Thrust')
+        thr_col = col.replace('Power', 'Thrust')
         merged[thr_col] = thrust_interp_func(merged[col])
 
-    # 6) 对IMU列低通滤波
-    logging.info("IMU数据低通滤波...")
-    merged = apply_lowpass_filter(merged, ['AccX','AccY','AccZ','AsX','AsY','AsZ'], 5, 50, 4)
+    # 6) 低通滤波步骤暂时移除，因为数据已在前面过滤
+    # logging.info("IMU数据低通滤波...")
+    # merged = apply_lowpass_filter(merged, ['AccX','AccY','AccZ','AsX','AsY','AsZ'], 5, 50, 4)
 
     # 缺失值填充
     if merged.isnull().any().any():
@@ -307,7 +296,7 @@ def full_pipeline(config):
 
     # 7) 加载推力分配矩阵
     logging.info("载入推力分配矩阵(6x8)...")
-    T = load_thrust_allocation_matrix(config.get('thrust_matrix_path',None))
+    T = load_thrust_allocation_matrix(config.get('thrust_matrix_path', None))
 
     # 8) 时间窗口切分
     logging.info("开始窗口切分...")
@@ -323,47 +312,43 @@ def full_pipeline(config):
         label_cols_thrust,
         motor_cols,
         T,
-        window_size=config.get('window_size',5),
+        window_size=config.get('window_size', 5),
         step=1,
         dt=dt
     )
 
     logging.info(f"窗口切分后: feats={feats.shape}, accs={accs.shape}, thrs={thrs.shape}, vels={vels.shape}, ang_acc={ang_accels.shape}")
 
-    # 9) 保存
+    # 9) 保存处理结果 .npy
     logging.info("保存处理结果 .npy...")
     save_dir = config['save_dir']
     os.makedirs(save_dir, exist_ok=True)
-    np.save(os.path.join(save_dir,"train_features.npy"), feats)
-    np.save(os.path.join(save_dir,"train_accel_labels.npy"), accs)
-    np.save(os.path.join(save_dir,"train_thrust_labels.npy"), thrs)
-    np.save(os.path.join(save_dir,"train_velocity_labels.npy"), vels)
-    np.save(os.path.join(save_dir,"train_angular_accel_labels.npy"), ang_accels)
+    np.save(os.path.join(save_dir, "train_features.npy"), feats)
+    np.save(os.path.join(save_dir, "train_accel_labels.npy"), accs)
+    np.save(os.path.join(save_dir, "train_thrust_labels.npy"), thrs)
+    np.save(os.path.join(save_dir, "train_velocity_labels.npy"), vels)
+    np.save(os.path.join(save_dir, "train_angular_accel_labels.npy"), ang_accels)
 
     logging.info("预处理完成.")
-    return feats, accs, thrs, vels, ang_accels, (alpha,beta)
+    return feats, accs, thrs, vels, ang_accels, (alpha, beta)
 
 ############################
 # 测试入口
 ############################
 if __name__=="__main__":
-    PROJECT_ROOT = os.path.dirname(
-        os.path.dirname(
-            os.path.abspath(__file__)
-        )
-    )
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     config = {
-        'thrust_path': os.path.join(PROJECT_ROOT,"data","raw","thrust_test.xlsx"),
-        'power_path' : os.path.join(PROJECT_ROOT,"data","raw","motro_data0112.csv"),
-        'imu_path'   : os.path.join(PROJECT_ROOT,"data","raw","downsampled_imu_data0112.csv"),
-        # 'thrust_matrix_path': os.path.join(PROJECT_ROOT,"data","raw","thrust_allocation_matrix.csv"),
-        'save_dir'   : os.path.join(PROJECT_ROOT,"data","processed"),
+        'thrust_path': os.path.join(PROJECT_ROOT, "data", "raw", "thrust_test.xlsx"),
+        'power_path' : os.path.join(PROJECT_ROOT, "data", "raw", "motro_data0112.csv"),
+        'imu_path'   : os.path.join(PROJECT_ROOT, "data", "raw", "downsampled_imu_data0112.csv"),
+        # 'thrust_matrix_path': os.path.join(PROJECT_ROOT, "data", "raw", "thrust_allocation_matrix.csv"),
+        'save_dir'   : os.path.join(PROJECT_ROOT, "data", "processed"),
         'window_size': 5,
         'dt': 0.5
     }
 
     feats, accs, thrs, vels, ang_accels, params = full_pipeline(config)
-    alpha,beta = params
+    alpha, beta = params
     logging.info(f"Features shape={feats.shape}, Acc shape={accs.shape}, Thrust shape={thrs.shape}")
     logging.info(f"Velocity shape={vels.shape}, AngularAccel shape={ang_accels.shape}")
     logging.info(f"Fitted thrust params: alpha={alpha:.4f}, beta={beta:.4f}")

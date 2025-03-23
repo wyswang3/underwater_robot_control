@@ -14,6 +14,7 @@ from models.dynamics_net import (
 )
 from utils.preprocessing import load_thrust_allocation_matrix
 from utils.visualization import plot_loss_curve, visualize_predictions
+from utils.random_segment_fit_utils import run_random_segment_fit
 from utils.dataset import PreprocessedDataset
 import evaluate  # 评估脚本
 #激活服务器虚拟环境：conda activate /home/furui/pzy/wys_lstm/wyswang3_env
@@ -244,6 +245,18 @@ def main():
     pred_plot_path = os.path.join(cfg.paths.SPLITS_DIR, "prediction_comparison.png")
     visualize_predictions(model, val_loader, device, save_path=pred_plot_path)
     print(f"预测可视化已保存 -> {pred_plot_path}")
+    # 13) 调用随机数据段预测对比脚本
+    # 假设 full_dataset 是 PreprocessedDataset 对象，与你训练时使用的数据一致
+    full_dataset = PreprocessedDataset(
+        features_file=cfg.paths.TRAIN_FEATURES_FILE,
+        accel_file=cfg.paths.TRAIN_ACCEL_LABELS_FILE,
+        angular_accel_file=cfg.paths.TRAIN_ANGULAR_ACCEL_LABELS_FILE,
+        thrust_file=cfg.paths.TRAIN_THRUST_LABELS_FILE,
+        window_size=cfg.training.WINDOW_SIZE
+    )
+
+    # 调用封装好的函数，dt=0.5 秒，数据段时长约15秒
+    run_random_segment_fit(cfg, model, full_dataset, device, dt=0.5, segment_duration=20)
 
 if __name__ == "__main__":
     main()

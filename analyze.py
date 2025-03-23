@@ -1,57 +1,60 @@
-#analyze.py
+#!/usr/bin/env python3
 import os
-import argparse
+import random
 import torch
+import numpy as np
+import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 
-# 从评估模块中导入 evaluate_main（评估流程）
-from evaluate import main as evaluate_main
-# 导入可视化函数（新版：针对每个维度绘制子图）
-from utils.visualization import visualize_predictions, plot_loss_curve
-# 导入配置
 from config import Config
-cfg = Config()
-# 导入模型结构和预处理工具
-from models.dynamics_net import HybridDynamicsModel, EnhancedPhysicsNet, DirectMappingNet
+from models.dynamics_net import EnhancedPhysicsNet, DirectMappingNet, HybridDynamicsModel
 from utils.preprocessing import load_thrust_allocation_matrix
-# 导入数据集类（已拆分到 utils/dataset.py）
 from utils.dataset import PreprocessedDataset
 
-def load_model(device):
-    """
-    根据配置加载模型结构并加载权重
-    """
-    checkpoint_path = r"D:\神经网络训练\underwater_robot_control\model_checkpoint.pt"
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"模型检查点不存在: {checkpoint_path}")
 
-    # 加载推力分配矩阵
+def main():
+    # 1. 加载配置与设备
+    cfg = Config()
+    device = torch.device(cfg.device.DEVICE)
+
+    # 设置采样间隔 dt（单位秒），假设为0.5秒（如果配置中有该参数，可直接使用）
+    dt = 0.5
+    # 每个样本覆盖的时间 = WINDOW_SIZE * dt
+    sample_time = cfg.training.WINDOW_SIZE * dt
+    # 要获得大约15秒的数据段，需要连续采样的个数
+    num_samples = int(15 / sample_time)
+    if num_samples < 1:
+        num_samples = 1
+    print(
+        f"Each sample covers {sample_time:.2f}s; selecting {num_samples} consecutive samples for a total of ~{num_samples * sample_time:.2f}s.")
+
+    # 2. 加载推力分配矩阵 (6x8)
     thrust_matrix_np = load_thrust_allocation_matrix(cfg.paths.THRUST_MATRIX_FILE)
     thrust_matrix = torch.tensor(thrust_matrix_np, device=device)
 
-    # 初始化物理引导网络和端到端网络，并构成混合网络
+    # 3. 构造模型（物理网络和端到端网络构成混合模型）
     physics_net = EnhancedPhysicsNet(
         thrust_matrix,
         window_size=cfg.training.WINDOW_SIZE,
-        hidden_dim=cfg.training.HIDDEN_DIM
+        hidden_dim=cfg.training.PHYSICS_HIDDEN_DIM
     )
     e2e_net = DirectMappingNet(
         window_size=cfg.training.WINDOW_SIZE,
-        hidden_dim=cfg.training.HIDDEN_DIM
+        hidden_dim=cfg.training.E2E_HIDDEN_DIM
     )
-    model = HybridDynamicsModel(physics_net, e2e_net).to(device)
+    model = HybridDynamicsModel(physics_net, e2e_net)
+    model.to(device)
+    model.eval()
 
-    # 加载权重
+    # 4. 加载训练好的模型检查点
+    checkpoint_path = os.path.join(cfg.paths.MODEL_DIR, "model_checkpoint.pt")
+    if not os.path.exists(checkpoint_path):
+        print("Checkpoint not found:", checkpoint_path)
+        return
     state_dict = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(state_dict)
-    model.eval()
-    print(f"已加载模型权重：{checkpoint_path}. 当前网络模式: {model.active_net}")
-    return model
 
-def get_dataloader():
-    """
-    构造并返回评估用数据集的 DataLoader
-    """
+    # 5. 加载预处理后的数据集
     dataset = PreprocessedDataset(
         features_file=cfg.paths.TRAIN_FEATURES_FILE,
         accel_file=cfg.paths.TRAIN_ACCEL_LABELS_FILE,
@@ -59,46 +62,73 @@ def get_dataloader():
         thrust_file=cfg.paths.TRAIN_THRUST_LABELS_FILE,
         window_size=cfg.training.WINDOW_SIZE
     )
-    loader = DataLoader(
-        dataset,
-        batch_size=cfg.training.BATCH_SIZE,
-        shuffle=False,
-        num_workers=cfg.training.NUM_WORKERS
-    )
-    return loader
+    total_samples = len(dataset)
+    if total_samples < num_samples:
+        print("Dataset is too small for the requested segment length.")
+        return
 
-def main():
-    parser = argparse.ArgumentParser(description="整合评估与可视化分析的脚本")
-    parser.add_argument("--evaluate", action="store_true", help="执行评估流程")
-    parser.add_argument("--visualize", action="store_true", help="执行预测可视化分析")
-    args = parser.parse_args()
+    # 随机选取一个起始索引，确保可以取出 num_samples 连续样本
+    start_idx = random.randint(0, total_samples - num_samples)
+    print(f"Selected segment starting at index {start_idx} covering {num_samples} consecutive samples.")
 
-    # 如果未指定参数，则默认同时执行评估和可视化
-    if not (args.evaluate or args.visualize):
-        args.evaluate = True
-        args.visualize = True
+    # 6. 收集连续样本数据
+    segment_power = []
+    segment_imu = []
+    segment_accel_measured = []
+    for i in range(start_idx, start_idx + num_samples):
+        sample = dataset[i]
+        segment_power.append(sample['power_window'])  # shape: (T, 8)
+        segment_imu.append(sample['imu_window'])  # shape: (T, 6)
+        segment_accel_measured.append(sample['accel'])  # shape: (3,) —— 取最后一帧的加速度作为标签
+    # 将列表堆叠为 tensor，形状：(num_samples, T, channels) 或 (num_samples, 3)
+    segment_power = torch.stack(segment_power, dim=0).to(device)
+    segment_imu = torch.stack(segment_imu, dim=0).to(device)
+    segment_accel_measured = torch.stack(segment_accel_measured, dim=0).to(device)  # shape: (num_samples, 3)
 
-    device = torch.device(cfg.device.DEVICE)
+    # 7. 利用模型对该段数据进行预测
+    with torch.no_grad():
+        outputs = model(segment_power, segment_imu)
+        # 若输出为字典，则取 'accel_pred'
+        if isinstance(outputs, dict):
+            segment_accel_pred = outputs.get('accel_pred')
+        else:
+            segment_accel_pred = outputs
 
-    # ===================== 执行评估 =====================
-    if args.evaluate:
-        eval_args = argparse.Namespace(
-            checkpoint=r"D:\神经网络训练\underwater_robot_control\model_checkpoint.pt"
-        )
-        print(">>> 开始评估 <<<")
-        evaluate_main(eval_args)
-        print(">>> 评估完成 <<<")
+    # 有时模型可能预测6轴数据，而标签只有3轴，这里假设取预测结果的前3轴与测量数据对比
+    if segment_accel_pred.shape[1] != segment_accel_measured.shape[1]:
+        segment_accel_pred = segment_accel_pred[:, :segment_accel_measured.shape[1]]
 
-    # ===================== 执行可视化分析 =====================
-    if args.visualize:
-        print(">>> 开始可视化分析 <<<")
-        model = load_model(device)
-        dataloader = get_dataloader()
-        save_fig_path = os.path.join(cfg.paths.SPLITS_DIR, "model_prediction_by_dimension.png")
-        visualize_predictions(model, dataloader, device, save_path=save_fig_path)
-        print(f"可视化结果已保存到: {save_fig_path}")
-        print(">>> 可视化分析完成 <<<")
+    # 转换为 numpy 数组以便绘图
+    segment_accel_pred = segment_accel_pred.cpu().numpy()  # shape: (num_samples, 3)
+    segment_accel_measured = segment_accel_measured.cpu().numpy()  # shape: (num_samples, 3)
+
+    # 构造时间轴（每个样本覆盖 sample_time 秒）
+    time_axis = np.arange(num_samples) * sample_time
+
+    # 8. 绘制预测与测量加速度的对比曲线：对每个轴绘制一张子图
+    num_axes = segment_accel_measured.shape[1]
+    fig, axs = plt.subplots(nrows=num_axes, ncols=1, figsize=(10, 4 * num_axes))
+    if num_axes == 1:
+        axs = [axs]
+    for ax, axis_idx in zip(axs, range(num_axes)):
+        ax.plot(time_axis, segment_accel_measured[:, axis_idx], 'o-', label='Measured')
+        ax.plot(time_axis, segment_accel_pred[:, axis_idx], 's--', label='Predicted')
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel(f"Acceleration Axis {axis_idx + 1}")
+        ax.set_title(f"Acceleration Comparison on Axis {axis_idx + 1}")
+        ax.legend()
+        ax.grid(True)
+    fig.tight_layout()
+    save_path_fig = os.path.join(cfg.paths.SPLITS_DIR, "segment_acceleration_comparison.png")
+    os.makedirs(os.path.dirname(save_path_fig), exist_ok=True)
+    fig.savefig(save_path_fig)
+    plt.show()
+    plt.close(fig)
+
+    # 9. 计算并输出整体 RMSE（所有轴综合）
+    rmse = np.sqrt(np.mean((segment_accel_pred - segment_accel_measured) ** 2))
+    print(f"Overall RMSE for the selected {num_samples * sample_time:.1f}s segment: {rmse:.3f}")
+
 
 if __name__ == "__main__":
     main()
-

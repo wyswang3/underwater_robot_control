@@ -54,7 +54,7 @@ class TrainingConfig:
     E2E_HIDDEN_DIM: int = 256
 
     # 训练轮数、batch大小、学习率等
-    NUM_EPOCHS: int = 120
+    NUM_EPOCHS: int = 280
     BATCH_SIZE: int = 32
     LEARNING_RATE: float = 2e-5
     WEIGHT_DECAY: float = 1e-5

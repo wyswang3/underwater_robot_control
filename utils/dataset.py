@@ -43,5 +43,5 @@ class PreprocessedDataset:
 #git checkout -b new-feature-branch
 #git status
 #git add .
-#git commit -m "添加了新的训练流程改进及其他修改"
+#git commit -m "添加了新的评估流程改进及可视化相关代码"
 #git push -u origin new-feature-branch

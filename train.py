@@ -254,9 +254,10 @@ def main():
         thrust_file=cfg.paths.TRAIN_THRUST_LABELS_FILE,
         window_size=cfg.training.WINDOW_SIZE
     )
-    # 调用封装好的函数，dt=0.5 秒，数据段时长约15秒
-    run_random_segment_fit(cfg, model, full_dataset, device, dt=0.5, segment_duration=20)
-    save_path = os.path.join(cfg.paths.SPLITS_DIR, "random_segment_comparison.png")
+    random_seg_plot_path = os.path.join(cfg.paths.SPLITS_DIR, "random_segment_comparison.png")
+    run_random_segment_fit(cfg, model, full_dataset, device, dt=0.5, segment_duration=20,
+                           save_path=random_seg_plot_path)
+    print(f"随机数据段预测对比图已保存 -> {random_seg_plot_path}")
 
 if __name__ == "__main__":
     main()

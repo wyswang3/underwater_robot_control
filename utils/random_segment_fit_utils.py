@@ -96,7 +96,7 @@ def plot_segment_comparison(time_axis, measured, predicted, save_path=None):
     plt.close(fig)
 
 
-def run_random_segment_fit(cfg, model, dataset, device, dt=0.5, segment_duration=20):
+def run_random_segment_fit(cfg, model, dataset, device, dt=0.5, segment_duration=20, save_path=None):
     """
     综合调用上述函数：
       - 根据 dt 和窗口大小计算每个样本覆盖的时间
@@ -127,10 +127,14 @@ def run_random_segment_fit(cfg, model, dataset, device, dt=0.5, segment_duration
     segment_accel_measured = segment_accel_measured.cpu().numpy()
     # 构造时间轴
     time_axis = np.arange(num_samples) * sample_time
-    # 设置保存路径：存放到 cfg.paths.SPLITS_DIR 下
-    save_path = os.path.join(cfg.paths.SPLITS_DIR, "random_segment_comparison.png")
+
+    # 如果没有传入保存路径，则默认保存到 SPLITS_DIR 下
+    if save_path is None:
+        save_path = os.path.join(cfg.paths.SPLITS_DIR, "random_segment_comparison.png")
+
     # 绘制对比图
     plot_segment_comparison(time_axis, segment_accel_measured, segment_accel_pred, save_path=save_path)
+
     # 计算整体 RMSE
     rmse = np.sqrt(np.mean((segment_accel_pred - segment_accel_measured) ** 2))
     print(f"随机抽取的 {num_samples * sample_time:.1f}s 数据段整体 RMSE: {rmse:.3f}")

@@ -4,6 +4,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 
+
 def select_random_segment(dataset, num_samples):
     """
     从数据集中随机选取连续的 num_samples 个样本
@@ -15,6 +16,7 @@ def select_random_segment(dataset, num_samples):
     start_idx = random.randint(0, total_samples - num_samples)
     segment_samples = [dataset[i] for i in range(start_idx, start_idx + num_samples)]
     return segment_samples, start_idx
+
 
 def extract_segment_data(segment_samples, device):
     """
@@ -34,6 +36,7 @@ def extract_segment_data(segment_samples, device):
     segment_accel_measured = torch.stack(segment_accel_measured, dim=0).to(device)
     return segment_power, segment_imu, segment_accel_measured
 
+
 def predict_segment(model, segment_power, segment_imu):
     """
     使用模型对选取的数据段进行预测，返回预测加速度。
@@ -49,22 +52,42 @@ def predict_segment(model, segment_power, segment_imu):
             preds = outputs
     return preds
 
+
 def plot_segment_comparison(time_axis, measured, predicted, save_path=None):
     """
-    绘制选取数据段中每个加速度轴随时间变化的对比曲线
+    绘制选取数据段中每个加速度轴随时间变化的对比图，包括：
+      - 左侧：测量值与预测值的时间序列对比
+      - 右侧：预测残差（预测值-测量值）随时间变化
+    每个子图标题中显示该轴的 RMSE 值。
     """
     num_axes = measured.shape[1]
-    fig, axs = plt.subplots(nrows=num_axes, ncols=1, figsize=(10, 4 * num_axes))
-    if num_axes == 1:
-        axs = [axs]
-    for i, ax in enumerate(axs):
-        ax.plot(time_axis, measured[:, i], 'o-', label='Measured')
-        ax.plot(time_axis, predicted[:, i], 's--', label='Predicted')
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel(f"Acceleration Axis {i+1}")
-        ax.set_title(f"Acceleration Comparison on Axis {i+1}")
-        ax.legend()
-        ax.grid(True)
+    # 创建 num_axes 行，2列的子图
+    fig, axs = plt.subplots(nrows=num_axes, ncols=2, figsize=(14, 4 * num_axes))
+
+    for i in range(num_axes):
+        # 左侧：时间序列对比
+        ax_ts = axs[i, 0] if num_axes > 1 else axs[0]
+        ax_ts.plot(time_axis, measured[:, i], 'o-', label='Measured')
+        ax_ts.plot(time_axis, predicted[:, i], 's--', label='Predicted')
+        ax_ts.set_xlabel("Time (s)")
+        ax_ts.set_ylabel(f"Axis {i + 1}")
+        # 计算该轴 RMSE
+        axis_rmse = np.sqrt(np.mean((predicted[:, i] - measured[:, i]) ** 2))
+        ax_ts.set_title(f"Axis {i + 1} Time Series (RMSE: {axis_rmse:.3f})")
+        ax_ts.legend()
+        ax_ts.grid(True)
+
+        # 右侧：残差（预测误差）对比
+        ax_res = axs[i, 1] if num_axes > 1 else axs[1]
+        residual = predicted[:, i] - measured[:, i]
+        ax_res.plot(time_axis, residual, 'o-', color='purple', label='Residual')
+        ax_res.axhline(0, color='red', linestyle='--')
+        ax_res.set_xlabel("Time (s)")
+        ax_res.set_ylabel("Residual")
+        ax_res.set_title(f"Axis {i + 1} Residual")
+        ax_res.legend()
+        ax_res.grid(True)
+
     fig.tight_layout()
     if save_path is not None:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -72,7 +95,8 @@ def plot_segment_comparison(time_axis, measured, predicted, save_path=None):
     plt.show()
     plt.close(fig)
 
-def run_random_segment_fit(cfg, model, dataset, device, dt=0.5, segment_duration=15):
+
+def run_random_segment_fit(cfg, model, dataset, device, dt=0.5, segment_duration=20):
     """
     综合调用上述函数：
       - 根据 dt 和窗口大小计算每个样本覆盖的时间
@@ -84,7 +108,8 @@ def run_random_segment_fit(cfg, model, dataset, device, dt=0.5, segment_duration
     num_samples = int(segment_duration / sample_time)
     if num_samples < 1:
         num_samples = 1
-    print(f"每个样本覆盖 {sample_time:.2f}s; 将选取 {num_samples} 个连续样本，总时长约 {num_samples * sample_time:.2f}s.")
+    print(
+        f"每个样本覆盖 {sample_time:.2f}s; 将选取 {num_samples} 个连续样本，总时长约 {num_samples * sample_time:.2f}s.")
 
     # 随机选取连续样本
     segment_samples, start_idx = select_random_segment(dataset, num_samples)
@@ -102,8 +127,9 @@ def run_random_segment_fit(cfg, model, dataset, device, dt=0.5, segment_duration
     segment_accel_measured = segment_accel_measured.cpu().numpy()
     # 构造时间轴
     time_axis = np.arange(num_samples) * sample_time
-    # 绘制对比图
+    # 设置保存路径：存放到 cfg.paths.SPLITS_DIR 下
     save_path = os.path.join(cfg.paths.SPLITS_DIR, "random_segment_comparison.png")
+    # 绘制对比图
     plot_segment_comparison(time_axis, segment_accel_measured, segment_accel_pred, save_path=save_path)
     # 计算整体 RMSE
     rmse = np.sqrt(np.mean((segment_accel_pred - segment_accel_measured) ** 2))

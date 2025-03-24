@@ -58,33 +58,46 @@ def plot_segment_comparison(time_axis, measured, predicted, save_path=None):
     绘制选取数据段中每个加速度轴随时间变化的对比图，包括：
       - 左侧：测量值与预测值的时间序列对比
       - 右侧：预测残差（预测值-测量值）随时间变化
-    每个子图标题中显示该轴的 RMSE 值。
+    如果数据有6个通道，前3个假设为线性加速度，后3个为角加速度，
+    图表标题将分别显示 "Linear Accel X/Y/Z" 和 "Angular Accel X/Y/Z" 及对应的 RMSE 值。
     """
     num_axes = measured.shape[1]
+    # 如果数据有6个通道，定义轴名称
+    if num_axes == 6:
+        axis_names = ["Linear Accel X", "Linear Accel Y", "Linear Accel Z",
+                      "Angular Accel X", "Angular Accel Y", "Angular Accel Z"]
+    else:
+        # 否则使用默认名称，如 Axis 1, Axis 2, ...
+        axis_names = [f"Axis {i + 1}" for i in range(num_axes)]
+
     # 创建 num_axes 行，2列的子图
     fig, axs = plt.subplots(nrows=num_axes, ncols=2, figsize=(14, 4 * num_axes))
 
+    # 如果只有一个轴，确保 axs 是二维数组
+    if num_axes == 1:
+        axs = np.array([axs])
+
     for i in range(num_axes):
         # 左侧：时间序列对比
-        ax_ts = axs[i, 0] if num_axes > 1 else axs[0]
+        ax_ts = axs[i, 0]
         ax_ts.plot(time_axis, measured[:, i], 'o-', label='Measured')
         ax_ts.plot(time_axis, predicted[:, i], 's--', label='Predicted')
         ax_ts.set_xlabel("Time (s)")
-        ax_ts.set_ylabel(f"Axis {i + 1}")
+        ax_ts.set_ylabel("Value")
         # 计算该轴 RMSE
         axis_rmse = np.sqrt(np.mean((predicted[:, i] - measured[:, i]) ** 2))
-        ax_ts.set_title(f"Axis {i + 1} Time Series (RMSE: {axis_rmse:.3f})")
+        ax_ts.set_title(f"{axis_names[i]} Time Series (RMSE: {axis_rmse:.3f})")
         ax_ts.legend()
         ax_ts.grid(True)
 
         # 右侧：残差（预测误差）对比
-        ax_res = axs[i, 1] if num_axes > 1 else axs[1]
+        ax_res = axs[i, 1]
         residual = predicted[:, i] - measured[:, i]
         ax_res.plot(time_axis, residual, 'o-', color='purple', label='Residual')
         ax_res.axhline(0, color='red', linestyle='--')
         ax_res.set_xlabel("Time (s)")
         ax_res.set_ylabel("Residual")
-        ax_res.set_title(f"Axis {i + 1} Residual")
+        ax_res.set_title(f"{axis_names[i]} Residual")
         ax_res.legend()
         ax_res.grid(True)
 
@@ -96,7 +109,7 @@ def plot_segment_comparison(time_axis, measured, predicted, save_path=None):
     plt.close(fig)
 
 
-def run_random_segment_fit(cfg, model, dataset, device, dt=0.5, segment_duration=20, save_path=None):
+def run_random_segment_fit(cfg, model, dataset, device, dt=0.5, segment_duration=30, save_path=None):
     """
     综合调用上述函数：
       - 根据 dt 和窗口大小计算每个样本覆盖的时间

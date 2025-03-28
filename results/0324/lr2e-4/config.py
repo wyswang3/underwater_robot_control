@@ -56,7 +56,7 @@ class TrainingConfig:
     # 训练轮数、batch大小、学习率等
     NUM_EPOCHS: int = 320
     BATCH_SIZE: int = 32
-    LEARNING_RATE: float = 2e-5
+    LEARNING_RATE: float = 2e-4
     WEIGHT_DECAY: float = 1e-5
     CLIP_GRAD_NORM: float = 1.0
     NUM_WORKERS: int = 4

@@ -43,5 +43,5 @@ class PreprocessedDataset:
 #git checkout -b new-feature-branch
 #git status
 #git add .
-#git commit -m "添加了新的可视化相关流程"
+#git commit -m "添加了新的可视化相关流程：随机取30s的样本进行6维预测，并将结果保存"
 #git push -u origin new-feature-branch

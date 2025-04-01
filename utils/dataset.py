@@ -44,4 +44,4 @@ class PreprocessedDataset:
 #git status
 #git add .
 #git commit -m "调整预处理代码，添加电机反转标签，确保推力方向正确"
-#git push -u origin new-feature-branch
+#git push -u origin motor-reversal-adjustment

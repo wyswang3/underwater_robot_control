@@ -54,15 +54,15 @@ class TrainingConfig:
     E2E_HIDDEN_DIM: int = 256
 
     # 训练轮数、batch大小、学习率等
-    NUM_EPOCHS: int = 5
+    NUM_EPOCHS: int = 160
     BATCH_SIZE: int = 32
-    LEARNING_RATE: float = 2e-5
+    LEARNING_RATE: float = 7e-5
     WEIGHT_DECAY: float = 1e-5
     CLIP_GRAD_NORM: float = 1.0
     NUM_WORKERS: int = 4
 
     # 损失函数权重：alpha 为推力损失、beta 为矩阵正则项、gamma 为其他扩展项
-    ALPHA: float = 1.0
+    ALPHA: float = 0.8
     BETA: float  = 0.1
     GAMMA: float = 0.01
 
@@ -70,10 +70,10 @@ class TrainingConfig:
 class DeviceConfig:
     """
     设备配置：如果环境变量 USE_CUDA=1 且存在 /dev/nvidia0，
-    则使用 'cuda:1' (表征第三张GPU)，否则使用 CPU。
+    则使用 'cuda:2' (表征第三张GPU)，否则使用 CPU。
     """
     DEVICE: str = field(default_factory=lambda: (
-        "cuda:0" if os.environ.get("USE_CUDA", "1") == "1"
+        "cuda:2" if os.environ.get("USE_CUDA", "1") == "1"
         and os.path.exists("/dev/nvidia0")
         else "cpu"
     ))

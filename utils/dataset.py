@@ -40,8 +40,8 @@ class PreprocessedDataset:
             'thrust': thrust
         }
 
-#git checkout -b new-feature-branch
+#git checkout -b motor-reversal-adjustment
 #git status
 #git add .
-#git commit -m "添加了新的可视化相关流程：随机取30s的样本进行6维预测，并将结果保存"
+#git commit -m "调整预处理代码，添加电机反转标签，确保推力方向正确"
 #git push -u origin new-feature-branch

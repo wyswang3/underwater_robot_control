@@ -1,4 +1,3 @@
-# evaluate.py
 import os
 import torch
 import numpy as np
@@ -9,65 +8,58 @@ import argparse
 # 项目内部模块导入
 # --------------------------
 from config import Config
+
 cfg = Config()
 
 from models.dynamics_net import (
     EnhancedPhysicsNet,
-    DirectMappingNet,
     HybridDynamicsModel,
-    EnhancedDynamicsLoss,
+    EnhancedDynamicsLoss
 )
 from utils.preprocessing import load_thrust_allocation_matrix
-
-# 假设数据集类 PreprocessedDataset 已经在 train.py 中定义，
-# 你可以直接从 train.py 导入或单独提取到 utils 模块中
 from utils.dataset import PreprocessedDataset
+
+
+# 占位的端到端网络，输出形状为 (B,6)
+class DummyE2ENet(torch.nn.Module):
+    def __init__(self, window_size=5, hidden_dim=256):
+        super().__init__()
+        self.fc = torch.nn.Sequential(
+            torch.nn.Linear((8 + 6) * window_size, hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, 6)
+        )
+
+    def forward(self, power_window, imu_window):
+        x = torch.cat([power_window, imu_window], dim=-1).flatten(1)
+        return self.fc(x)
 
 
 def validate_model(model, loss_fn, val_loader):
     """
-    对模型进行验证，返回在验证集上的平均损失 avg_loss。
-
-    :param model: 已训练的模型 (physics/e2e/hybrid)
-    :param loss_fn: 损失函数 (如 EnhancedDynamicsLoss)
-    :param val_loader: 验证集 DataLoader
-    :return: avg_loss (float), 验证集平均 loss
+    对模型进行验证，返回在验证集上的平均损失。
     """
-    model.eval()  # 设置为评估模式
-    device = next(model.parameters()).device  # 取得模型参数所在设备
-
+    model.eval()
+    device = next(model.parameters()).device
     total_loss = 0.0
     sample_count = 0
-
     with torch.no_grad():
         for batch in val_loader:
-            # 将 batch 中所有张量移动到相同的 device 上
             for k in batch:
                 batch[k] = batch[k].to(device)
-
-            # 前向传播
             outputs = model(batch['power_window'], batch['imu_window'])
-
-            # 计算损失
             loss = loss_fn(outputs, batch)
-
-            # 累加加权损失
             batch_size = batch['accel'].size(0)
             total_loss += loss.item() * batch_size
             sample_count += batch_size
-
     avg_loss = total_loss / sample_count if sample_count > 0 else 0.0
-
-    # 如果需要再次切回训练模式，可加:
-    # model.train()
-
     return avg_loss
 
 
 def main(args):
     device = torch.device(cfg.device.DEVICE)
 
-    # 构造评估数据集（这里使用整个预处理数据作为评估集；如需要可按比例划分）
+    # 构造评估数据集（使用整个预处理数据）
     full_dataset = PreprocessedDataset(
         features_file=cfg.paths.TRAIN_FEATURES_FILE,
         accel_file=cfg.paths.TRAIN_ACCEL_LABELS_FILE,
@@ -86,16 +78,18 @@ def main(args):
     thrust_matrix_np = load_thrust_allocation_matrix(cfg.paths.THRUST_MATRIX_FILE)
     thrust_matrix = torch.tensor(thrust_matrix_np, device=device)
 
-    # 构造混合网络：同时包含物理引导网络和端到端网络
+    # 初始化物理分支网络
     physics_net = EnhancedPhysicsNet(
-        thrust_matrix,
+        thrust_matrix=thrust_matrix,
         window_size=cfg.training.WINDOW_SIZE,
         hidden_dim=cfg.training.PHYSICS_HIDDEN_DIM
     )
-    e2e_net = DirectMappingNet(
+    # 使用 DummyE2ENet 作为端到端分支
+    e2e_net = DummyE2ENet(
         window_size=cfg.training.WINDOW_SIZE,
         hidden_dim=cfg.training.E2E_HIDDEN_DIM
     )
+    # 构造混合模型
     model = HybridDynamicsModel(physics_net, e2e_net)
     model.to(device)
 
@@ -107,28 +101,23 @@ def main(args):
     state_dict = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(state_dict)
 
-    # 不强制修改 active_net，而是先打印当前网络模式（注意：state_dict 不保存 active_net，
-    # 如果没有额外保存该属性，模型会使用 __init__ 中的默认值）
-    if hasattr(model, "active_net"):
-        print("当前评估模式（训练过程中确定）：", model.active_net)
-
-    # 如果命令行参数中指定了评估模式，则根据参数进行切换；否则保持训练时模式
-    if hasattr(args, "mode") and args.mode:
-        eval_mode = args.mode.lower()
-        if eval_mode in ["physics", "e2e"]:
-            model.active_net = eval_mode
-            print("根据命令行参数切换评估模式为：", eval_mode)
-        else:
-            print("未知模式参数，保持当前模式：", model.active_net)
-
     # 初始化损失函数
+    # 注意：若 TrainingConfig 中未定义 DELTA，则使用默认值 0.1
     criterion = EnhancedDynamicsLoss(
         alpha=cfg.training.ALPHA,
         beta=cfg.training.BETA,
-        gamma=cfg.training.GAMMA
+        gamma=cfg.training.GAMMA,
+        delta=cfg.training.DELTA if hasattr(cfg.training, "DELTA") else 0.1
     )
 
-    # 开始评估
     print("开始评估……")
     avg_loss = validate_model(model, criterion, eval_loader)
     print("评估完成，平均总损失：{:.6f}".format(avg_loss))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="模型评估")
+    parser.add_argument("--checkpoint", type=str, default="model_checkpoint.pt", help="模型检查点路径")
+    parser.add_argument("--mode", type=str, default="physics", help="评估模式：physics 或 e2e")
+    args = parser.parse_args()
+    main(args)

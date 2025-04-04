@@ -1,12 +1,12 @@
 import os
+import torch
 from dataclasses import dataclass, field
-
 
 @dataclass
 class PathsConfig:
     """
     存放项目中各类文件与目录的路径配置。
-    根据 PROJECT_ROOT 自动生成各类路径，并创建所需目录。
+    在 __post_init__ 中根据 PROJECT_ROOT 动态生成具体路径。
     """
     PROJECT_ROOT: str = field(default_factory=lambda: os.path.abspath(os.path.dirname(__file__)))
 
@@ -17,7 +17,7 @@ class PathsConfig:
     TRAIN_VELOCITY_LABELS_FILE: str = field(init=False)
     TRAIN_ANGULAR_ACCEL_LABELS_FILE: str = field(init=False)
 
-    # 推力矩阵文件（如无则使用默认）
+    # 推力分配矩阵文件（如无则使用默认）
     THRUST_MATRIX_FILE: str = field(init=False)
 
     # 模型、日志和数据切分目录
@@ -26,73 +26,71 @@ class PathsConfig:
     SPLITS_DIR: str = field(init=False)
 
     def __post_init__(self):
-        # 数据文件路径
+        # 设置训练数据及标签文件路径
         self.TRAIN_FEATURES_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed", "train_features.npy")
         self.TRAIN_ACCEL_LABELS_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed", "train_accel_labels.npy")
         self.TRAIN_THRUST_LABELS_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed", "train_thrust_labels.npy")
-        self.TRAIN_VELOCITY_LABELS_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed",
-                                                       "train_velocity_labels.npy")
-        self.TRAIN_ANGULAR_ACCEL_LABELS_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed",
-                                                            "train_angular_accel_labels.npy")
+        self.TRAIN_VELOCITY_LABELS_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed", "train_velocity_labels.npy")
+        self.TRAIN_ANGULAR_ACCEL_LABELS_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed", "train_angular_accel_labels.npy")
 
-        # 推力矩阵文件
+        # 设置推力分配矩阵文件路径
         self.THRUST_MATRIX_FILE = os.path.join(self.PROJECT_ROOT, "data", "raw", "thrust_allocation_matrix.csv")
 
-        # 目录路径
+        # 设置模型、日志和数据切分目录
         self.MODEL_DIR = os.path.join(self.PROJECT_ROOT, "models", "checkpoints")
         self.LOG_DIR = os.path.join(self.PROJECT_ROOT, "logs")
         self.SPLITS_DIR = os.path.join(self.PROJECT_ROOT, "data", "splits")
 
         # 自动创建目录
-        self._make_dirs([self.MODEL_DIR, self.LOG_DIR, self.SPLITS_DIR])
-
-    def _make_dirs(self, dirs):
-        """创建目录列表中的所有目录（若不存在则创建）。"""
-        for d in dirs:
+        for d in [self.MODEL_DIR, self.LOG_DIR, self.SPLITS_DIR]:
             os.makedirs(d, exist_ok=True)
-
 
 @dataclass
 class TrainingConfig:
     """
-    训练相关的超参数配置，包括网络结构、训练轮数、batch 大小、学习率等。
+    训练相关超参数配置，包括网络结构、训练轮数、batch大小、学习率等参数，
+    以及带热重启余弦退火调度器的参数和损失函数权重。
     """
+    # 基本参数
     WINDOW_SIZE: int = 5
-    PHYSICS_HIDDEN_DIM: int = 512  # 物理网络隐藏层维度
-    E2E_HIDDEN_DIM: int = 256  # 端到端网络隐藏层维度
+    PHYSICS_HIDDEN_DIM: int = 512
+    E2E_HIDDEN_DIM: int = 256
 
-    NUM_EPOCHS: int = 5
+    NUM_EPOCHS: int = 10
     BATCH_SIZE: int = 32
-    LEARNING_RATE: float = 2e-5
-    WEIGHT_DECAY: float = 1e-5
+    LEARNING_RATE: float = 2e-3
+    WEIGHT_DECAY: float = 1e-4
     CLIP_GRAD_NORM: float = 1.0
     NUM_WORKERS: int = 4
 
-    # 损失函数权重设置
-    ALPHA: float = 1.0  # 推力损失权重
-    BETA: float = 0.1  # 矩阵正则项权重
-    GAMMA: float = 0.01  # 其他扩展损失权重
-    DELTA: float = 0.1  # 方向损失权重
+    # 损失函数权重（数据驱动与物理约束之间的权重平衡）
+    ALPHA: float = 1.0
+    BETA: float = 0.1
+    GAMMA: float = 0.01
+    DELTA: float = 0.1
 
+    # 学习率调度器参数（CosineAnnealingWarmRestarts）
+    LR_SCHEDULER: bool = True
+    T_0: int = 10           # 初始重启周期（以 epoch 计）
+    T_MULT: int = 2         # 重启周期乘数
+    ETA_MIN: float = 1e-5   # 最低学习率
 
 @dataclass
 class DeviceConfig:
     """
-    设备配置：
-      - 如果环境变量 USE_CUDA=1 且存在 /dev/nvidia0，则使用 'cuda:GPU_ID'（通过环境变量 GPU_ID 指定，默认 '0'）；
-      - 否则使用 CPU。
+    设备配置：如果 torch.cuda.is_available() 为 True，则使用 GPU，
+    否则使用 CPU。可通过环境变量 GPU_ID 指定 GPU 序号（例如 "0"、"1"）。
     """
     DEVICE: str = field(default_factory=lambda: (
-        "cuda:" + os.environ.get("GPU_ID", "0")
-        if os.environ.get("USE_CUDA", "0") == "1" and os.path.exists("/dev/nvidia0")
-        else "cpu"
+        f"cuda:{os.environ.get('GPU_ID', '0')}"
+        if torch.cuda.is_available() else "cpu"
     ))
-
 
 @dataclass
 class Config:
     """
-    主配置，包含路径、训练和设备子配置，同时提供调试开关 DEBUG。
+    主配置，包含路径、训练、设备等子配置，以及调试开关。
+    你可以根据需要进一步扩展，例如支持从 YAML/JSON 文件加载配置。
     """
     paths: PathsConfig = field(default_factory=PathsConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
@@ -127,10 +125,15 @@ class Config:
         print(f"GAMMA: {self.training.GAMMA}")
         print(f"DELTA: {self.training.DELTA}\n")
 
+        print("=== Scheduler Config ===")
+        print(f"LR_SCHEDULER: {self.training.LR_SCHEDULER}")
+        print(f"T_0: {self.training.T_0}")
+        print(f"T_MULT: {self.training.T_MULT}")
+        print(f"ETA_MIN: {self.training.ETA_MIN}\n")
+
         print("=== Device Config ===")
         print(f"DEVICE: {self.device.DEVICE}")
         print(f"DEBUG: {self.DEBUG}")
-
 
 if __name__ == "__main__":
     cfg = Config()

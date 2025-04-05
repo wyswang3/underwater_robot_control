@@ -108,8 +108,8 @@ def check_dataset(dataset: Dataset, accel_threshold: float = 1):
 
 
 
-#git checkout -b new-feature-branch
+#git checkout -b motor-reversal-adjustment
 #git status
 #git add .
-#git commit -m "添加了新的可视化相关流程：随机取30s的样本进行6维预测，并将结果保存"
-#git push -u origin new-feature-branch
+#git commit -m "设计了新的网络结构"
+#git push -u origin motor-reversal-adjustment

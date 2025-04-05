@@ -5,19 +5,19 @@ import argparse
 import multiprocessing
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from torch.cuda.amp import autocast, GradScaler
-# 激活服务器虚拟环境：conda activate /home/furui/pzy/wys_lstm/wyswang3_env
+
 # 项目内部模块导入
 from config import Config
-from models.dynamics_net import DynamicsCore, PhysicsGuidedLoss
+from models.dynamics_net import SimpleHydroNet  # 使用新网络结构 SimpleHydroNet
 from utils.preprocessing import load_thrust_allocation_matrix
 from utils.visualization import plot_loss_curve, visualize_predictions
 from utils.random_segment_fit_utils import run_random_segment_fit
 from utils.dataset import PreprocessedDataset, check_dataset
-import evaluate  # 评估脚本
+import evaluate  # 外部评估脚本
 from utils.training import custom_train_model, validate_model
 
 def split_dataset(dataset, train_ratio=0.8):
-    """划分数据集为训练集和验证集"""
+    """将数据集划分为训练集和验证集。"""
     total = len(dataset)
     train_size = int(total * train_ratio)
     val_size = total - train_size
@@ -33,25 +33,23 @@ def main():
     torch.manual_seed(42)
     np.random.seed(42)
     device = torch.device(cfg.device.DEVICE)
+    print(f"使用设备：{device}")
 
     # 2) 加载推力分配矩阵 (6x8)
-    # 如果后续不使用可注释掉此部分
+    # 新网络可能不使用推力数据，可传入占位Tensor或直接忽略。
     thrust_matrix_np = load_thrust_allocation_matrix(cfg.paths.THRUST_MATRIX_FILE)
     thrust_matrix = torch.tensor(thrust_matrix_np, device=device)
 
-    # 3) 初始化模型
-    # DynamicsCore 模型输入维度为14 (8+6)，隐藏层维度和时间窗口均来自配置
-    model = DynamicsCore(
-        input_dim=14,
-        hidden_dim=cfg.training.PHYSICS_HIDDEN_DIM,
-        window_size=cfg.training.WINDOW_SIZE
+    # 3) 初始化模型：使用新的 SimpleHydroNet，超参数从配置中获取
+    model = SimpleHydroNet(
+        window_size=cfg.training.WINDOW_SIZE,
+        input_dim=cfg.training.INPUT_DIM if hasattr(cfg.training, 'INPUT_DIM') else 14,
+        hidden_dim=cfg.training.PHYSICS_HIDDEN_DIM
     ).to(device)
 
-    # 4) 定义损失函数（利用物理指导损失），质量和惯性矩阵可根据实际情况调整
-    criterion = PhysicsGuidedLoss(
-        mass=10.0,
-        inertia=torch.eye(3).to(device)
-    )
+
+    # 4) 定义损失函数（使用简单的均方误差损失）
+    criterion = torch.nn.MSELoss()
 
     # 5) 配置优化器和学习率调度器
     optimizer = torch.optim.AdamW(
@@ -68,7 +66,7 @@ def main():
             eta_min=cfg.training.ETA_MIN
         )
 
-    # 6) 加载预处理后的数据集（暂时不使用速度数据）
+    # 6) 加载预处理后的数据集（暂不使用速度数据）
     full_dataset = PreprocessedDataset(
         features_file=cfg.paths.TRAIN_FEATURES_FILE,
         accel_file=cfg.paths.TRAIN_ACCEL_LABELS_FILE,
@@ -80,19 +78,21 @@ def main():
     check_dataset(full_dataset, accel_threshold=1)
     print("数据检查结束.")
 
-    # 7) 划分训练集和验证集，并构建 DataLoader
+    # 7) 划分数据集并构建 DataLoader
     train_dataset, val_dataset = split_dataset(full_dataset, train_ratio=0.8)
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=cfg.training.BATCH_SIZE,
         shuffle=True,
-        num_workers=cfg.training.NUM_WORKERS
+        num_workers=cfg.training.NUM_WORKERS,
+        pin_memory=True if device.type == 'cuda' else False
     )
     val_loader = torch.utils.data.DataLoader(
         val_dataset,
         batch_size=cfg.training.BATCH_SIZE,
         shuffle=False,
-        num_workers=cfg.training.NUM_WORKERS
+        num_workers=cfg.training.NUM_WORKERS,
+        pin_memory=True if device.type == 'cuda' else False
     )
 
     # 8) 开始训练模型

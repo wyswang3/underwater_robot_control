@@ -2,68 +2,74 @@ import os
 import torch
 from dataclasses import dataclass, field
 
+
 @dataclass
 class PathsConfig:
     """
-    存放项目中各类文件与目录的路径配置。
-    在 __post_init__ 中根据 PROJECT_ROOT 动态生成具体路径。
+    路径配置：定义项目中数据、模型、日志等相关文件和目录的路径。
+    在 __post_init__ 中根据 PROJECT_ROOT 动态生成各个文件和目录的完整路径，
+    并自动创建模型、日志和数据切分目录，确保运行时文件夹存在。
     """
     PROJECT_ROOT: str = field(default_factory=lambda: os.path.abspath(os.path.dirname(__file__)))
 
-    # 训练数据及标签文件
+    # 数据文件
     TRAIN_FEATURES_FILE: str = field(init=False)
     TRAIN_ACCEL_LABELS_FILE: str = field(init=False)
     TRAIN_THRUST_LABELS_FILE: str = field(init=False)
     TRAIN_VELOCITY_LABELS_FILE: str = field(init=False)
     TRAIN_ANGULAR_ACCEL_LABELS_FILE: str = field(init=False)
 
-    # 推力分配矩阵文件（如无则使用默认）
+    # 推力分配矩阵（可选）
     THRUST_MATRIX_FILE: str = field(init=False)
 
-    # 模型、日志和数据切分目录
+    # 输出目录：模型检查点、日志、数据划分
     MODEL_DIR: str = field(init=False)
     LOG_DIR: str = field(init=False)
     SPLITS_DIR: str = field(init=False)
 
-    def __post_init__(self):
-        # 设置训练数据及标签文件路径
+    def __post_init__(self) -> None:
         self.TRAIN_FEATURES_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed", "train_features.npy")
         self.TRAIN_ACCEL_LABELS_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed", "train_accel_labels.npy")
         self.TRAIN_THRUST_LABELS_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed", "train_thrust_labels.npy")
-        self.TRAIN_VELOCITY_LABELS_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed", "train_velocity_labels.npy")
-        self.TRAIN_ANGULAR_ACCEL_LABELS_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed", "train_angular_accel_labels.npy")
+        self.TRAIN_VELOCITY_LABELS_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed",
+                                                       "train_velocity_labels.npy")
+        self.TRAIN_ANGULAR_ACCEL_LABELS_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed",
+                                                            "train_angular_accel_labels.npy")
 
-        # 设置推力分配矩阵文件路径
         self.THRUST_MATRIX_FILE = os.path.join(self.PROJECT_ROOT, "data", "raw", "thrust_allocation_matrix.csv")
 
-        # 设置模型、日志和数据切分目录
         self.MODEL_DIR = os.path.join(self.PROJECT_ROOT, "models", "checkpoints")
         self.LOG_DIR = os.path.join(self.PROJECT_ROOT, "logs")
         self.SPLITS_DIR = os.path.join(self.PROJECT_ROOT, "data", "splits")
 
-        # 自动创建目录
         for d in [self.MODEL_DIR, self.LOG_DIR, self.SPLITS_DIR]:
             os.makedirs(d, exist_ok=True)
+
 
 @dataclass
 class TrainingConfig:
     """
-    训练相关超参数配置，包括网络结构、训练轮数、batch大小、学习率等参数，
-    以及带热重启余弦退火调度器的参数和损失函数权重。
+    训练超参数配置：包含数据预处理、网络结构、训练策略等参数。
     """
-    # 基本参数
-    WINDOW_SIZE: int = 5
-    PHYSICS_HIDDEN_DIM: int = 512
-    E2E_HIDDEN_DIM: int = 256
+    # 数据与网络输入
+    WINDOW_SIZE: int = 5  # 时间窗口大小
+    INPUT_DIM: int = 14  # 每个时间步特征数（8 电机功率 + 6 IMU）
 
-    NUM_EPOCHS: int = 10
+    # 新网络结构相关参数（针对 DeepHydroNet）
+    PHYSICS_HIDDEN_DIM: int = 512  # 用于 LSTM 的输出维度
+    USE_DYNAMIC_WIDTH: bool = True  # 是否启用动态宽度调整
+    BASE_WIDTH: int = 512  # 动态宽度模块的基宽（通常与 PHYSICS_HIDDEN_DIM 保持一致）
+    MAX_WIDTH: int = 1024  # 动态宽度模块扩展后的最大宽度
+
+    # 训练参数
+    NUM_EPOCHS: int = 15
     BATCH_SIZE: int = 32
-    LEARNING_RATE: float = 2e-3
+    LEARNING_RATE: float = 5e-4
     WEIGHT_DECAY: float = 1e-4
     CLIP_GRAD_NORM: float = 1.0
     NUM_WORKERS: int = 4
 
-    # 损失函数权重（数据驱动与物理约束之间的权重平衡）
+    # 损失函数权重（数据驱动损失与物理约束损失之间的权重平衡）
     ALPHA: float = 1.0
     BETA: float = 0.1
     GAMMA: float = 0.01
@@ -71,33 +77,34 @@ class TrainingConfig:
 
     # 学习率调度器参数（CosineAnnealingWarmRestarts）
     LR_SCHEDULER: bool = True
-    T_0: int = 10           # 初始重启周期（以 epoch 计）
-    T_MULT: int = 2         # 重启周期乘数
-    ETA_MIN: float = 1e-5   # 最低学习率
+    T_0: int = 10
+    T_MULT: int = 2
+    ETA_MIN: float = 1e-6
+
 
 @dataclass
 class DeviceConfig:
     """
-    设备配置：如果 torch.cuda.is_available() 为 True，则使用 GPU，
-    否则使用 CPU。可通过环境变量 GPU_ID 指定 GPU 序号（例如 "0"、"1"）。
+    设备配置：自动检测 GPU 可用性，若有 GPU 则使用 GPU，否则使用 CPU。
+    可通过环境变量 GPU_ID 指定 GPU 序号（例如 "0"、"1"）。
     """
     DEVICE: str = field(default_factory=lambda: (
-        f"cuda:{os.environ.get('GPU_ID', '0')}"
-        if torch.cuda.is_available() else "cpu"
+        f"cuda:{os.environ.get('GPU_ID', '0')}" if torch.cuda.is_available() else "cpu"
     ))
+
 
 @dataclass
 class Config:
     """
-    主配置，包含路径、训练、设备等子配置，以及调试开关。
-    你可以根据需要进一步扩展，例如支持从 YAML/JSON 文件加载配置。
+    主配置：整合路径、训练、设备等配置，便于统一管理各模块超参数。
+    未来可扩展为支持 YAML/JSON 配置文件加载。
     """
     paths: PathsConfig = field(default_factory=PathsConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     device: DeviceConfig = field(default_factory=DeviceConfig)
-    DEBUG: bool = False  # 调试开关
+    DEBUG: bool = False
 
-    def print_config(self):
+    def print_config(self) -> None:
         print("========== Config ==========")
         print(f"PROJECT_ROOT: {self.paths.PROJECT_ROOT}")
         print(f"TRAIN_FEATURES_FILE: {self.paths.TRAIN_FEATURES_FILE}")
@@ -112,8 +119,12 @@ class Config:
 
         print("=== Training Config ===")
         print(f"WINDOW_SIZE: {self.training.WINDOW_SIZE}")
+        print(f"INPUT_DIM: {self.training.INPUT_DIM}")
         print(f"PHYSICS_HIDDEN_DIM: {self.training.PHYSICS_HIDDEN_DIM}")
-        print(f"E2E_HIDDEN_DIM: {self.training.E2E_HIDDEN_DIM}")
+        print(f"USE_DYNAMIC_WIDTH: {self.training.USE_DYNAMIC_WIDTH}")
+        if self.training.USE_DYNAMIC_WIDTH:
+            print(f"BASE_WIDTH: {self.training.BASE_WIDTH}")
+            print(f"MAX_WIDTH: {self.training.MAX_WIDTH}")
         print(f"NUM_EPOCHS: {self.training.NUM_EPOCHS}")
         print(f"BATCH_SIZE: {self.training.BATCH_SIZE}")
         print(f"LEARNING_RATE: {self.training.LEARNING_RATE}")
@@ -134,6 +145,7 @@ class Config:
         print("=== Device Config ===")
         print(f"DEVICE: {self.device.DEVICE}")
         print(f"DEBUG: {self.DEBUG}")
+
 
 if __name__ == "__main__":
     cfg = Config()

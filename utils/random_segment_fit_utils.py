@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-def select_random_segment(dataset, num_samples):
+def select_random_segment(dataset, num_samples: int):
     """
     从数据集中随机选取连续的 num_samples 个样本
     返回：选取的样本列表和起始索引
@@ -21,83 +21,66 @@ def select_random_segment(dataset, num_samples):
 def extract_segment_data(segment_samples, device):
     """
     从选取的样本列表中提取所需数据：
-      - 每个样本包含 'power_window' (T, 8)，'imu_window' (T, 6)，'accel' (3,)
-    返回：将各个样本堆叠为 tensor
+      - 每个样本包含 'power_window' (T, 8)，'imu_window' (T, 6)，'accel' (6,) 和 'thrust' (6,)
+    返回：将各个样本堆叠为 tensor，形状分别为：
+      - segment_power: (N, T, 8)
+      - segment_imu:   (N, T, 6)
+      - segment_accel_measured: (N, 6)
+      - segment_thrust: (N, 6)
     """
     segment_power = []
     segment_imu = []
     segment_accel_measured = []
+    segment_thrust = []
     for sample in segment_samples:
         segment_power.append(sample['power_window'])
         segment_imu.append(sample['imu_window'])
-        segment_accel_measured.append(sample['accel'])  # 假设使用最后一帧加速度作为标签
+        segment_accel_measured.append(sample['accel'])
+        segment_thrust.append(sample['thrust'])
     segment_power = torch.stack(segment_power, dim=0).to(device)
     segment_imu = torch.stack(segment_imu, dim=0).to(device)
     segment_accel_measured = torch.stack(segment_accel_measured, dim=0).to(device)
-    return segment_power, segment_imu, segment_accel_measured
+    segment_thrust = torch.stack(segment_thrust, dim=0).to(device)
+    return segment_power, segment_imu, segment_accel_measured, segment_thrust
 
-
-def predict_segment(model, segment_power, segment_imu):
+def plot_segment_comparison(time_axis: np.ndarray, measured: np.ndarray, predicted: np.ndarray, save_path: str = None):
     """
-    使用模型对选取的数据段进行预测，返回预测加速度。
-    如果模型输出为字典，则取 'accel_pred'
-    """
-    with torch.no_grad():
-        outputs = model(segment_power, segment_imu)
-        if isinstance(outputs, dict):
-            preds = outputs.get('accel_pred', None)
-            if preds is None:
-                raise ValueError("模型输出中未找到 'accel_pred'")
-        else:
-            preds = outputs
-    return preds
-
-
-def plot_segment_comparison(time_axis, measured, predicted, save_path=None):
-    """
-    绘制选取数据段中每个加速度轴随时间变化的对比图，包括：
-      - 左侧：测量值与预测值的时间序列对比
-      - 右侧：预测残差（预测值-测量值）随时间变化
-    如果数据有6个通道，前3个假设为线性加速度，后3个为角加速度，
-    图表标题将分别显示 "Linear Accel X/Y/Z" 和 "Angular Accel X/Y/Z" 及对应的 RMSE 值。
+    绘制选取数据段中各加速度轴随时间变化的对比图：
+      - 左侧显示真实值与预测值的时间序列对比
+      - 右侧显示预测残差（预测值-真实值）随时间变化
+    如果数据有6个通道，假设前3个为线性加速度，后3个为角加速度，
+    并在图标题中标注 RMSE 值。
     """
     num_axes = measured.shape[1]
-    # 如果数据有6个通道，定义轴名称
     if num_axes == 6:
         axis_names = ["Linear Accel X", "Linear Accel Y", "Linear Accel Z",
                       "Angular Accel X", "Angular Accel Y", "Angular Accel Z"]
     else:
-        # 否则使用默认名称，如 Axis 1, Axis 2, ...
         axis_names = [f"Axis {i + 1}" for i in range(num_axes)]
 
-    # 创建 num_axes 行，2列的子图
     fig, axs = plt.subplots(nrows=num_axes, ncols=2, figsize=(14, 4 * num_axes))
-
-    # 如果只有一个轴，确保 axs 是二维数组
     if num_axes == 1:
         axs = np.array([axs])
-
     for i in range(num_axes):
         # 左侧：时间序列对比
         ax_ts = axs[i, 0]
         ax_ts.plot(time_axis, measured[:, i], 'o-', label='Measured')
         ax_ts.plot(time_axis, predicted[:, i], 's--', label='Predicted')
+        rmse = np.sqrt(np.mean((predicted[:, i] - measured[:, i]) ** 2))
+        ax_ts.set_title(f"{axis_names[i]} Time Series (RMSE: {rmse:.3f})")
         ax_ts.set_xlabel("Time (s)")
         ax_ts.set_ylabel("Value")
-        # 计算该轴 RMSE
-        axis_rmse = np.sqrt(np.mean((predicted[:, i] - measured[:, i]) ** 2))
-        ax_ts.set_title(f"{axis_names[i]} Time Series (RMSE: {axis_rmse:.3f})")
         ax_ts.legend()
         ax_ts.grid(True)
 
-        # 右侧：残差（预测误差）对比
+        # 右侧：残差对比
         ax_res = axs[i, 1]
         residual = predicted[:, i] - measured[:, i]
         ax_res.plot(time_axis, residual, 'o-', color='purple', label='Residual')
         ax_res.axhline(0, color='red', linestyle='--')
+        ax_res.set_title(f"{axis_names[i]} Residual")
         ax_res.set_xlabel("Time (s)")
         ax_res.set_ylabel("Residual")
-        ax_res.set_title(f"{axis_names[i]} Residual")
         ax_res.legend()
         ax_res.grid(True)
 
@@ -113,14 +96,13 @@ def run_random_segment_fit(cfg, model, dataset, device, dt=0.5, segment_duration
     """
     综合调用上述函数：
       - 根据 dt 和窗口大小计算每个样本覆盖的时间
-      - 计算选取的连续样本数，使总时长约为 segment_duration 秒
+      - 计算连续样本数，使总时长约为 segment_duration 秒
       - 从数据集中随机选取连续样本，提取数据、预测、可视化并计算 RMSE
     """
-    # 每个样本覆盖的时长
+    # 每个样本覆盖的时长 = WINDOW_SIZE * dt
     sample_time = cfg.training.WINDOW_SIZE * dt
     num_samples = int(segment_duration / sample_time)
-    if num_samples < 1:
-        num_samples = 1
+    num_samples = max(1, num_samples)
     print(
         f"每个样本覆盖 {sample_time:.2f}s; 将选取 {num_samples} 个连续样本，总时长约 {num_samples * sample_time:.2f}s.")
 
@@ -128,26 +110,45 @@ def run_random_segment_fit(cfg, model, dataset, device, dt=0.5, segment_duration
     segment_samples, start_idx = select_random_segment(dataset, num_samples)
     print(f"选取数据段起始索引：{start_idx}")
 
-    # 提取数据
-    segment_power, segment_imu, segment_accel_measured = extract_segment_data(segment_samples, device)
-    # 模型预测
-    segment_accel_pred = predict_segment(model, segment_power, segment_imu)
-    # 如果预测结果维度与标签不一致，则取前几轴
-    if segment_accel_pred.shape[1] != segment_accel_measured.shape[1]:
-        segment_accel_pred = segment_accel_pred[:, :segment_accel_measured.shape[1]]
-    # 转换为 numpy 数组
+    # 提取数据，同时提取推力信息
+    seg_power, seg_imu, seg_accel_measured, seg_thrust = extract_segment_data(segment_samples, device)
+    # 拼接 power_window 和 imu_window 为 (N, T, 14)，再展平为 (N, T*14)
+    segment_features = torch.cat([seg_power, seg_imu], dim=2).view(seg_power.size(0), -1)
+
+    # 模型预测，传入提取到的 seg_thrust
+    segment_accel_pred = predict_segment(model, segment_features, seg_thrust)
+
+    # 如果预测结果维度与标签不一致，则截断
+    if segment_accel_pred.shape[1] != seg_accel_measured.shape[1]:
+        segment_accel_pred = segment_accel_pred[:, :seg_accel_measured.shape[1]]
+
     segment_accel_pred = segment_accel_pred.cpu().numpy()
-    segment_accel_measured = segment_accel_measured.cpu().numpy()
+    seg_accel_measured = seg_accel_measured.cpu().numpy()
+
     # 构造时间轴
     time_axis = np.arange(num_samples) * sample_time
 
-    # 如果没有传入保存路径，则默认保存到 SPLITS_DIR 下
     if save_path is None:
         save_path = os.path.join(cfg.paths.SPLITS_DIR, "random_segment_comparison.png")
 
     # 绘制对比图
-    plot_segment_comparison(time_axis, segment_accel_measured, segment_accel_pred, save_path=save_path)
+    plot_segment_comparison(time_axis, seg_accel_measured, segment_accel_pred, save_path=save_path)
 
     # 计算整体 RMSE
-    rmse = np.sqrt(np.mean((segment_accel_pred - segment_accel_measured) ** 2))
+    rmse = np.sqrt(np.mean((segment_accel_pred - seg_accel_measured) ** 2))
     print(f"随机抽取的 {num_samples * sample_time:.1f}s 数据段整体 RMSE: {rmse:.3f}")
+
+
+def predict_segment(model, segment_features, thrust):
+    """
+    使用模型对选取的数据段进行预测，返回预测加速度。
+    假设模型的 forward 接口为: model(features, thrust)
+    输出为 (pred_lin, pred_ang)，拼接后为 (N, 6)
+    """
+    with torch.no_grad():
+        outputs = model(segment_features, thrust)
+        pred_lin, pred_ang = outputs
+        preds = torch.cat([pred_lin, pred_ang], dim=1)
+    return preds
+
+

@@ -3,21 +3,24 @@ import numpy as np
 import torch
 import os
 import matplotlib
+from torch.utils.data import DataLoader
+from typing import Optional, Union, List
 
-# 使用支持中文的字体（如 SimHei），避免中文字符缺失警告
+# 设置支持中文字体，避免中文字符缺失
 matplotlib.rcParams['font.sans-serif'] = ['SimHei']
 matplotlib.rcParams['font.family'] = 'sans-serif'
 matplotlib.rcParams['axes.unicode_minus'] = False
 
-
-def plot_loss_curve(train_losses, val_losses=None, save_path=None):
+def plot_loss_curve(train_losses: Union[List[float], np.ndarray],
+                    val_losses: Optional[Union[List[float], np.ndarray]] = None,
+                    save_path: Optional[str] = None) -> None:
     """
     绘制训练过程中的损失曲线
 
     参数:
-      train_losses: list or numpy array，每个 epoch 的训练损失
-      val_losses: list or numpy array，每个 epoch 的验证损失（可选）
-      save_path: str，如果指定，则保存图像到该路径
+      - train_losses: 每个 epoch 的训练损失列表或数组
+      - val_losses: 每个 epoch 的验证损失（可选）
+      - save_path: 如果指定，则将图像保存到该路径
     """
     epochs = np.arange(1, len(train_losses) + 1)
     plt.figure(figsize=(8, 6))
@@ -30,24 +33,25 @@ def plot_loss_curve(train_losses, val_losses=None, save_path=None):
     plt.legend()
     plt.grid(True)
     if save_path is not None:
-        # 自动创建保存目录
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         plt.savefig(save_path)
     plt.show()
     plt.close()
 
-
-def visualize_predictions(model, dataloader, device, num_samples=6, save_path=None):
+def visualize_predictions(model: torch.nn.Module,
+                          dataloader: DataLoader,
+                          device: torch.device,
+                          num_samples: int = 6,
+                          save_path: Optional[str] = None) -> None:
     """
-    可视化模型在一个完整 batch 中的预测结果，并计算每个样本的RMSE误差。
-    每个子图对应一个样本，x轴表示各维度（例如6维），曲线上分别绘制真实值与预测值，
-    标题中标注该样本的RMSE，以更准确评估预测精度。
+    可视化模型在一个 batch 上的预测结果，并计算每个样本的 RMSE 误差。
+    每个子图对应一个样本，显示真实值与预测值的比较，并在标题中标注 RMSE。
 
     参数：
-      - model: 训练好的模型（EnhancedPhysicsNet/DirectMappingNet/HybridDynamicsModel）
-      - dataloader: 数据加载器 (DataLoader)，用于获取一个完整 batch 的数据
-      - device: 模型所在设备 (torch.device)
-      - num_samples: 从 batch 中取出的样本数量（默认6）
+      - model: 训练好的模型，接受输入形状 (B, window_size*14) 和 (B, 6)
+      - dataloader: DataLoader，用于获取一个 batch 数据
+      - device: 模型所在设备
+      - num_samples: 从 batch 中取出的样本数量（默认 6）
       - save_path: 如果指定，则将图像保存到该路径
     """
     model.eval()
@@ -58,37 +62,39 @@ def visualize_predictions(model, dataloader, device, num_samples=6, save_path=No
             print("Visualization failed: DataLoader has no data!")
             return
 
-        # 将batch中所有张量移动到device上
+        # 将 batch 中所有张量移动到指定设备
         for k in batch:
             batch[k] = batch[k].to(device)
 
-        outputs = model(batch['power_window'], batch['imu_window'])
-        if isinstance(outputs, dict):
-            preds = outputs.get('accel_pred', None)
-            if preds is None:
-                print("Visualization failed: 'accel_pred' not found in model output!")
-                return
-        else:
-            preds = outputs
+        # 将 'power_window' 和 'imu_window' 拼接后展平
+        # 假设 'power_window': (B, W, 8) 和 'imu_window': (B, W, 6)
+        features = torch.cat([batch['power_window'], batch['imu_window']], dim=2)  # (B, W, 14)
+        features = features.view(features.size(0), -1)  # (B, W*14)
 
-        predictions = preds.cpu().numpy()  # shape: (B, D)
-        targets = batch['accel'].cpu().numpy()  # shape: (B, D)
+        thrust = batch['thrust']  # (B, 6)
+
+        # 模型前向传播
+        outputs = model(features, thrust)
+        # 这里假设模型返回的是一个元组 (pred_lin, pred_ang)
+        pred_lin, pred_ang = outputs
+        preds = torch.cat([pred_lin, pred_ang], dim=1)  # (B, 6)
+        predictions = preds.cpu().numpy()  # (B, 6)
+        targets = batch['accel'].cpu().numpy()  # (B, 6)
 
     B, dim_pred = predictions.shape
-    _, dim_tar = targets.shape
-    if dim_pred != dim_tar:
-        print(f"Visualization failed: Prediction dimension ({dim_pred}) != Target dimension ({dim_tar})")
+    if dim_pred != targets.shape[1]:
+        print(f"Visualization failed: Prediction dimension ({dim_pred}) != Target dimension ({targets.shape[1]})")
         return
 
     # 只取前 num_samples 个样本进行可视化
     predictions = predictions[:num_samples]
     targets = targets[:num_samples]
 
-    # 使用subplots创建多个子图
+    # 创建子图
     fig, axes = plt.subplots(nrows=num_samples, ncols=1, figsize=(12, 4 * num_samples))
     if num_samples == 1:
-        axes = [axes]  # 保证axes是列表
-    x_ticks = np.arange(dim_pred)  # 对应维度索引，例如 [0,1,...,dim_pred-1]
+        axes = [axes]
+    x_ticks = np.arange(dim_pred)
     for i, ax in enumerate(axes):
         sample_pred = predictions[i]
         sample_target = targets[i]

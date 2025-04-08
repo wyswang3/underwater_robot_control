@@ -16,3 +16,8 @@ underwater_robot_control/
 ├── evaluate.py               # 评估脚本
 └── requirements.txt          # 依赖库
 # 激活服务器虚拟环境：conda activate /home/furui/pzy/wys_lstm/wyswang3_env
+#git checkout -b motor-reversal-adjustment
+#git status
+#git add .
+#git commit -m "设计了新的网络结构"
+#git push -u origin motor-reversal-adjustment

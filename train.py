@@ -8,7 +8,7 @@ from torch.cuda.amp import autocast, GradScaler
 
 # 项目内部模块导入
 from config import Config
-from models.dynamics_net import SimpleHydroNet  # 使用新网络结构 SimpleHydroNet
+from models.dynamics_net import BetterHydroNet, HydroParamEstimator, PhysicsAwareLoss
 from utils.preprocessing import load_thrust_allocation_matrix
 from utils.visualization import plot_loss_curve, visualize_predictions
 from utils.random_segment_fit_utils import run_random_segment_fit
@@ -33,23 +33,29 @@ def main():
     torch.manual_seed(42)
     np.random.seed(42)
     device = torch.device(cfg.device.DEVICE)
-    print(f"使用设备：{device}")
+    print(f"Using device: {device}")
 
     # 2) 加载推力分配矩阵 (6x8)
-    # 新网络可能不使用推力数据，可传入占位Tensor或直接忽略。
+    # 如果新网络不直接依赖推力数据，可以传入占位Tensor
     thrust_matrix_np = load_thrust_allocation_matrix(cfg.paths.THRUST_MATRIX_FILE)
     thrust_matrix = torch.tensor(thrust_matrix_np, device=device)
 
-    # 3) 初始化模型：使用新的 SimpleHydroNet，超参数从配置中获取
-    model = SimpleHydroNet(
+    # 3) 初始化模型：使用 BetterHydroNet
+    model = BetterHydroNet(
         window_size=cfg.training.WINDOW_SIZE,
-        input_dim=cfg.training.INPUT_DIM if hasattr(cfg.training, 'INPUT_DIM') else 14,
-        hidden_dim=cfg.training.PHYSICS_HIDDEN_DIM
+        input_dim=cfg.training.INPUT_DIM,
+        hidden_dim=cfg.training.HIDDEN_DIM,
+        lstm_layers=cfg.training.LSTM_LAYERS
     ).to(device)
+   # print("Model architecture:")
+   # print(model)
 
-
-    # 4) 定义损失函数（使用简单的均方误差损失）
-    criterion = torch.nn.MSELoss()
+    # 4) 定义物理感知损失函数
+    # 注意：这里的损失函数依赖于推力数据以及后续 HydroParamEstimator 输出的参数
+    criterion = PhysicsAwareLoss(
+        inertia=torch.eye(3).to(device),
+        lambda_phy=0.4
+    )
 
     # 5) 配置优化器和学习率调度器
     optimizer = torch.optim.AdamW(
@@ -66,7 +72,8 @@ def main():
             eta_min=cfg.training.ETA_MIN
         )
 
-    # 6) 加载预处理后的数据集（暂不使用速度数据）
+    # 6) 加载预处理数据集
+    # 数据集文件需包含 'power_window', 'imu_window', 'accel', 'thrust'
     full_dataset = PreprocessedDataset(
         features_file=cfg.paths.TRAIN_FEATURES_FILE,
         accel_file=cfg.paths.TRAIN_ACCEL_LABELS_FILE,
@@ -74,9 +81,9 @@ def main():
         thrust_file=cfg.paths.TRAIN_THRUST_LABELS_FILE,
         window_size=cfg.training.WINDOW_SIZE
     )
-    print("=== 检查数据集零值情况 ===")
+    print("=== Checking dataset for zeros ===")
     check_dataset(full_dataset, accel_threshold=1)
-    print("数据检查结束.")
+    print("Dataset check complete.")
 
     # 7) 划分数据集并构建 DataLoader
     train_dataset, val_dataset = split_dataset(full_dataset, train_ratio=0.8)
@@ -95,8 +102,8 @@ def main():
         pin_memory=True if device.type == 'cuda' else False
     )
 
-    # 8) 开始训练模型
-    print("=== 开始训练 ===")
+    # 8) 训练模型
+    print("=== Starting Training ===")
     model, train_losses = custom_train_model(
         model, criterion, train_loader,
         epochs=cfg.training.NUM_EPOCHS,
@@ -109,12 +116,12 @@ def main():
     # 9) 保存训练好的模型
     checkpoint_path = os.path.join(cfg.paths.MODEL_DIR, "model_checkpoint.pt")
     torch.save(model.state_dict(), checkpoint_path)
-    print(f"模型已保存 -> {checkpoint_path}")
+    print(f"Model saved -> {checkpoint_path}")
 
     # 10) 绘制训练损失曲线
     loss_plot_path = os.path.join(cfg.paths.SPLITS_DIR, "training_loss.png")
     plot_loss_curve(train_losses, save_path=loss_plot_path)
-    print(f"训练损失曲线已保存 -> {loss_plot_path}")
+    print(f"Training loss curve saved -> {loss_plot_path}")
 
     # 11) 在验证集上评估模型
     val_loss = validate_model(model, criterion, val_loader)
@@ -122,19 +129,19 @@ def main():
 
     # 12) 调用评估脚本
     eval_args = argparse.Namespace(checkpoint=checkpoint_path)
-    print("=== 开始评估 ===")
+    print("=== Starting Evaluation ===")
     evaluate.main(eval_args)
 
     # 13) 可视化预测结果
     pred_plot_path = os.path.join(cfg.paths.SPLITS_DIR, "prediction_comparison.png")
     visualize_predictions(model, val_loader, device, save_path=pred_plot_path)
-    print(f"预测可视化已保存 -> {pred_plot_path}")
+    print(f"Prediction visualization saved -> {pred_plot_path}")
 
     # 14) 随机数据段预测对比
     random_seg_plot_path = os.path.join(cfg.paths.SPLITS_DIR, "random_segment_comparison.png")
     run_random_segment_fit(cfg, model, full_dataset, device, dt=0.11, segment_duration=20,
                              save_path=random_seg_plot_path)
-    print(f"随机数据段预测对比图已保存 -> {random_seg_plot_path}")
+    print(f"Random segment comparison saved -> {random_seg_plot_path}")
 
 if __name__ == "__main__":
     main()

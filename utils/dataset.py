@@ -100,13 +100,10 @@ def check_dataset(dataset: Dataset, accel_threshold: float = 1):
 
     if problematic_samples:
         print(f"警告: 在 {len(problematic_samples)} 个样本中检测到异常情况：")
-        for idx, norm_val in problematic_samples:
-            print(f"  样本 {idx}: 电机8通道功率全为0，但线性加速度范数为 {norm_val:.3f} (阈值 {accel_threshold})")
+        #for idx, norm_val in problematic_samples:
+          #  print(f"  样本 {idx}: 电机8通道功率全为0，但线性加速度范数为 {norm_val:.3f} (阈值 {accel_threshold})")
     else:
         print("数据集检查通过，没有发现电机全零但加速度异常的情况。")
-
-
-
 
 #git checkout -b motor-reversal-adjustment
 #git status

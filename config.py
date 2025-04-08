@@ -54,12 +54,12 @@ class TrainingConfig:
 
     # Network structure parameters
     HIDDEN_DIM: int = 512            # LSTM output dimension (for bidirectional LSTM, total dimension = HIDDEN_DIM)
-    LSTM_LAYERS: int = 3             # Number of LSTM layers
+    LSTM_LAYERS: int = 2             # Number of LSTM layers
 
     # Training hyperparameters
-    NUM_EPOCHS: int = 15
+    NUM_EPOCHS: int = 45
     BATCH_SIZE: int = 32
-    LEARNING_RATE: float = 5e-5
+    LEARNING_RATE: float = 5e-4
     WEIGHT_DECAY: float = 1e-4
     CLIP_GRAD_NORM: float = 1.0
     NUM_WORKERS: int = 4

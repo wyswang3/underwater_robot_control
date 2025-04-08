@@ -360,7 +360,7 @@ def full_pipeline(config):
 
     # 8) 时间窗口切分
     logging.info("开始窗口切分...")
-    dt = config.get('dt', 0.12)
+    dt = config.get('dt', 0.2)
     input_cols = motor_cols + ['AccX','AccY','AccZ','AsX','AsY','AsZ']
     label_cols_acc = ['AccX','AccY','AccZ']
     label_cols_thrust = [m.replace('Power','Thrust') for m in motor_cols]
@@ -404,7 +404,7 @@ if __name__=="__main__":
         # 'thrust_matrix_path': os.path.join(PROJECT_ROOT, "data", "raw", "thrust_allocation_matrix.csv"),
         'save_dir'   : os.path.join(PROJECT_ROOT, "data", "processed"),
         'window_size': 5,
-        'dt': 0.12
+        'dt': 0.2
     }
 
     feats, accs, thrs, vels, ang_accels, params = full_pipeline(config)

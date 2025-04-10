@@ -1,144 +1,153 @@
+# config.py  ── 完全替换原文件即可
 import os
+from pathlib import Path
+from dataclasses import dataclass, field, asdict
 import torch
-from dataclasses import dataclass, field
+from typing import Dict, Any
 
+
+# ╭─────────────────────────────╮
+# │ 1. 工具函数                 │
+# ╰─────────────────────────────╯
+def _p(*parts) -> Path:
+    """跨平台路径拼接（返回 pathlib.Path）。"""
+    return Path(*parts).expanduser().resolve()
+
+
+def _mkdirs(*dirs: Path):
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
+
+
+def _pretty_dict(d: Dict[str, Any], indent: int = 2) -> str:
+    return "\n".join(f"{' '*indent}{k:<15}: {v}" for k, v in d.items())
+
+
+# ╭─────────────────────────────╮
+# │ 2. 路径配置                 │
+# ╰─────────────────────────────╯
 @dataclass
 class PathsConfig:
-    """
-    PathsConfig defines the file and directory paths for the project, including data, models, and logs.
-    The __post_init__ method dynamically generates complete paths based on PROJECT_ROOT and creates
-    directories if they don't exist.
-    """
-    PROJECT_ROOT: str = field(default_factory=lambda: os.path.abspath(os.path.dirname(__file__)))
+    PROJECT_ROOT: Path = field(
+        default_factory=lambda: _p(__file__).parent
+    )
 
-    # Data files
-    TRAIN_FEATURES_FILE: str = field(init=False)
-    TRAIN_ACCEL_LABELS_FILE: str = field(init=False)
-    TRAIN_THRUST_LABELS_FILE: str = field(init=False)
-    TRAIN_VELOCITY_LABELS_FILE: str = field(init=False)
-    TRAIN_ANGULAR_ACCEL_LABELS_FILE: str = field(init=False)
+    # 以下字段在 __post_init__ 中生成
+    TRAIN_FEATURES_FILE: Path = field(init=False)
+    TRAIN_ACCEL_LABELS_FILE: Path = field(init=False)
+    TRAIN_THRUST_LABELS_FILE: Path = field(init=False)
+    TRAIN_VELOCITY_LABELS_FILE: Path = field(init=False)
+    TRAIN_ANGULAR_ACCEL_LABELS_FILE: Path = field(init=False)
+    THRUST_MATRIX_FILE: Path = field(init=False)
 
-    # Thrust allocation matrix (optional)
-    THRUST_MATRIX_FILE: str = field(init=False)
+    MODEL_DIR: Path = field(init=False)
+    LOG_DIR: Path = field(init=False)
+    SPLITS_DIR: Path = field(init=False)
 
-    # Output directories: model checkpoints, logs, and data splits
-    MODEL_DIR: str = field(init=False)
-    LOG_DIR: str = field(init=False)
-    SPLITS_DIR: str = field(init=False)
+    def __post_init__(self):
+        data_proc = self.PROJECT_ROOT / "data" / "processed"
+        data_raw  = self.PROJECT_ROOT / "data" / "raw"
 
-    def __post_init__(self) -> None:
-        self.TRAIN_FEATURES_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed", "train_features.npy")
-        self.TRAIN_ACCEL_LABELS_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed", "train_accel_labels.npy")
-        self.TRAIN_THRUST_LABELS_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed", "train_thrust_labels.npy")
-        self.TRAIN_VELOCITY_LABELS_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed", "train_velocity_labels.npy")
-        self.TRAIN_ANGULAR_ACCEL_LABELS_FILE = os.path.join(self.PROJECT_ROOT, "data", "processed", "train_angular_accel_labels.npy")
+        self.TRAIN_FEATURES_FILE        = data_proc / "train_features.npy"
+        self.TRAIN_ACCEL_LABELS_FILE    = data_proc / "train_accel_labels.npy"
+        self.TRAIN_THRUST_LABELS_FILE   = data_proc / "train_thrust_labels.npy"
+        self.TRAIN_VELOCITY_LABELS_FILE = data_proc / "train_velocity_labels.npy"
+        self.TRAIN_ANGULAR_ACCEL_LABELS_FILE = data_proc / "train_angular_accel_labels.npy"
 
-        self.THRUST_MATRIX_FILE = os.path.join(self.PROJECT_ROOT, "data", "raw", "thrust_allocation_matrix.csv")
+        self.THRUST_MATRIX_FILE = data_raw / "thrust_allocation_matrix.csv"
 
-        self.MODEL_DIR = os.path.join(self.PROJECT_ROOT, "models", "checkpoints")
-        self.LOG_DIR = os.path.join(self.PROJECT_ROOT, "logs")
-        self.SPLITS_DIR = os.path.join(self.PROJECT_ROOT, "data", "splits")
+        self.MODEL_DIR  = self.PROJECT_ROOT / "models" / "checkpoints"
+        self.LOG_DIR    = self.PROJECT_ROOT / "logs"
+        self.SPLITS_DIR = self.PROJECT_ROOT / "data" / "splits"
 
-        for d in [self.MODEL_DIR, self.LOG_DIR, self.SPLITS_DIR]:
-            os.makedirs(d, exist_ok=True)
+        _mkdirs(self.MODEL_DIR, self.LOG_DIR, self.SPLITS_DIR)
 
 
+# ╭─────────────────────────────╮
+# │ 3. 训练超参数               │
+# ╰─────────────────────────────╯
 @dataclass
 class TrainingConfig:
-    """
-    TrainingConfig specifies hyperparameters for data preprocessing, network structure, and training strategy.
-    """
-    # Data & network input parameters
-    WINDOW_SIZE: int = 5             # Time window size
-    INPUT_DIM: int = 14              # Features per time step (8 motor power + 6 IMU)
+    # 原有字段…
+    WINDOW_SIZE: int = 5
+    INPUT_DIM: int = 14
+    HIDDEN_DIM: int = 512
+    LSTM_LAYERS: int = 2
+    # 新增模型相关字段
+    HYDRO_HIDDEN: int = 128
+    MATRIX_DIM: int = 6
+    HYDRO_MIN_DIAG: float = 1e-2
+    LSTM_DROPOUT: float = 0.3
+    LAYER_DROPOUT: float = 0.4
+    RESIDUAL_DROPOUT: float = 0.4
+    VELOCITY_HIDDEN: int = 128
 
-    # Network structure parameters
-    HIDDEN_DIM: int = 512            # LSTM output dimension (for bidirectional LSTM, total dimension = HIDDEN_DIM)
-    LSTM_LAYERS: int = 2             # Number of LSTM layers
-
-    # Training hyperparameters
-    NUM_EPOCHS: int = 45
-    BATCH_SIZE: int = 32
-    LEARNING_RATE: float = 5e-4
-    WEIGHT_DECAY: float = 1e-4
+    # 可选：损失相关参数
+    LAMBDA_PHY: float = 0.4
+    BETA_REG: float = 0.1
+    LOSS_EPS: float = 1e-6
+    # 训练
+    NUM_EPOCHS  : int   = 120
+    BATCH_SIZE  : int   = 32
+    LEARNING_RATE : float = 1e-5
+    WEIGHT_DECAY  : float = 1e-5
     CLIP_GRAD_NORM: float = 1.0
-    NUM_WORKERS: int = 4
+    NUM_WORKERS   : int   = 2
 
-    # Loss function weights (for physical constraints, can be tuned)
-    ALPHA: float = 1.0   # (Optional, for further extension)
-    BETA: float = 0.1
+    # 物理损失权重（保留占位）
+    ALPHA: float = 1.0
+    BETA : float = 0.1
     GAMMA: float = 0.01
     DELTA: float = 0.1
 
-    # Learning rate scheduler parameters (CosineAnnealingWarmRestarts)
-    LR_SCHEDULER: bool = True
-    T_0: int = 10
-    T_MULT: int = 2
+    # Scheduler
+    LR_SCHEDULER: bool  = True
+    T_0   : int   = 10
+    T_MULT: int   = 2
     ETA_MIN: float = 1e-6
 
 
+# ╭─────────────────────────────╮
+# │ 4. 设备配置                 │
+# ╰─────────────────────────────╯
 @dataclass
 class DeviceConfig:
-    """
-    DeviceConfig automatically selects GPU if available, otherwise CPU.
-    You can specify a GPU by setting the environment variable GPU_ID.
-    """
-    DEVICE: str = field(default_factory=lambda: (
-        f"cuda:{os.environ.get('GPU_ID', '0')}" if torch.cuda.is_available() else "cpu"
-    ))
+    DEVICE: str = field(
+        default_factory=lambda: (
+            f"cuda:{os.getenv('GPU_ID', 0)}"
+            if torch.cuda.is_available()
+            else "cpu"
+        )
+    )
 
 
+# ╭─────────────────────────────╮
+# │ 5. 主配置                   │
+# ╰─────────────────────────────╯
 @dataclass
 class Config:
-    """
-    Main configuration consolidates paths, training, and device configurations.
-    It can be extended in the future to load settings from YAML/JSON files.
-    """
-    paths: PathsConfig = field(default_factory=PathsConfig)
+    paths   : PathsConfig    = field(default_factory=PathsConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
-    device: DeviceConfig = field(default_factory=DeviceConfig)
-    DEBUG: bool = False
+    device  : DeviceConfig   = field(default_factory=DeviceConfig)
+    DEBUG   : bool           = False
 
-    def print_config(self) -> None:
-        print("========== Config ==========")
-        print(f"PROJECT_ROOT: {self.paths.PROJECT_ROOT}")
-        print(f"TRAIN_FEATURES_FILE: {self.paths.TRAIN_FEATURES_FILE}")
-        print(f"TRAIN_ACCEL_LABELS_FILE: {self.paths.TRAIN_ACCEL_LABELS_FILE}")
-        print(f"TRAIN_THRUST_LABELS_FILE: {self.paths.TRAIN_THRUST_LABELS_FILE}")
-        print(f"TRAIN_VELOCITY_LABELS_FILE: {self.paths.TRAIN_VELOCITY_LABELS_FILE}")
-        print(f"TRAIN_ANGULAR_ACCEL_LABELS_FILE: {self.paths.TRAIN_ANGULAR_ACCEL_LABELS_FILE}")
-        print(f"THRUST_MATRIX_FILE: {self.paths.THRUST_MATRIX_FILE}")
-        print(f"MODEL_DIR: {self.paths.MODEL_DIR}")
-        print(f"LOG_DIR: {self.paths.LOG_DIR}")
-        print(f"SPLITS_DIR: {self.paths.SPLITS_DIR}")
-        print("----------------------------------")
-        print("=== Training Config ===")
-        print(f"WINDOW_SIZE: {self.training.WINDOW_SIZE}")
-        print(f"INPUT_DIM: {self.training.INPUT_DIM}")
-        print(f"HIDDEN_DIM: {self.training.HIDDEN_DIM}")
-        print(f"LSTM_LAYERS: {self.training.LSTM_LAYERS}")
-        print(f"NUM_EPOCHS: {self.training.NUM_EPOCHS}")
-        print(f"BATCH_SIZE: {self.training.BATCH_SIZE}")
-        print(f"LEARNING_RATE: {self.training.LEARNING_RATE}")
-        print(f"WEIGHT_DECAY: {self.training.WEIGHT_DECAY}")
-        print(f"CLIP_GRAD_NORM: {self.training.CLIP_GRAD_NORM}")
-        print(f"NUM_WORKERS: {self.training.NUM_WORKERS}")
-        print(f"ALPHA: {self.training.ALPHA}")
-        print(f"BETA: {self.training.BETA}")
-        print(f"GAMMA: {self.training.GAMMA}")
-        print(f"DELTA: {self.training.DELTA}")
-        print("----------------------------------")
-        print("=== Scheduler Config ===")
-        print(f"LR_SCHEDULER: {self.training.LR_SCHEDULER}")
-        print(f"T_0: {self.training.T_0}")
-        print(f"T_MULT: {self.training.T_MULT}")
-        print(f"ETA_MIN: {self.training.ETA_MIN}")
-        print("----------------------------------")
-        print("=== Device Config ===")
-        print(f"DEVICE: {self.device.DEVICE}")
-        print(f"DEBUG: {self.DEBUG}")
+    # -------- 打印 --------
+    def print_config(self):
+        print("\n========== Config ==========")
+        print("• Paths")
+        for k, v in asdict(self.paths).items():
+            print(f"  {k:<25}: {v}")
+        print("• Training")
+        print(_pretty_dict(asdict(self.training)))
+        print("• Device")
+        print(f"  DEVICE              : {self.device.DEVICE}")
+        print(f"  DEBUG               : {self.DEBUG}")
+        print("============================\n")
 
 
+# ╭─────────────────────────────╮
+# │ 6. 快速测试                 │
+# ╰─────────────────────────────╯
 if __name__ == "__main__":
     cfg = Config()
     cfg.print_config()

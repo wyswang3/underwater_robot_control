@@ -1,118 +1,146 @@
 import torch
-from torch.cuda.amp import autocast, GradScaler
 import torch.nn as nn
+from contextlib import nullcontext
+from torch import amp
 
 
-def batch_to_device(batch, device):
-    """
-    递归地将 batch 内所有 Tensor（包括嵌套在字典或列表中的）移动到指定 device 上。
-    """
-    if isinstance(batch, dict):
-        return {key: batch_to_device(val, device) for key, val in batch.items()}
-    elif isinstance(batch, list):
-        return [batch_to_device(item, device) for item in batch]
-    elif isinstance(batch, torch.Tensor):
-        return batch.to(device)
-    else:
-        return batch
+# ------------------------------------------------------------------
+# 1. 把任意嵌套结构搬到指定 device
+# ------------------------------------------------------------------
+def batch_to_device(obj, device):
+    if torch.is_tensor(obj):
+        return obj.to(device, non_blocking=True)
+    if isinstance(obj, dict):
+        return {k: batch_to_device(v, device) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(batch_to_device(v, device) for v in obj)
+    return obj
 
 
+# ------------------------------------------------------------------
+# 2. 拆分 batch
+# ------------------------------------------------------------------
 def process_batch(batch, device):
-    """
-    从 batch 字典中提取输入数据和标签，转换并移动到指定 device 上。
-
-    假设 batch 包含：
-      - 'power_window': Tensor, shape (B, window_size, 8)
-      - 'imu_window':   Tensor, shape (B, window_size, 6)
-      - 'accel':        Tensor, shape (B, 6)  （前3为线性加速度，后3为角加速度）
-      - 'thrust':       Tensor, shape (B, 6)
-    返回：
-      - features: Tensor, shape (B, window_size*14)
-      - true_lin: Tensor, shape (B, 3)
-      - true_ang: Tensor, shape (B, 3)
-      - thrust:   Tensor, shape (B, 6)
-    """
     batch = batch_to_device(batch, device)
-    power_window = batch['power_window']  # (B, W, 8)
-    imu_window = batch['imu_window']  # (B, W, 6)
-    features = torch.cat([power_window, imu_window], dim=2).view(power_window.size(0), -1)
-    accel_all = batch['accel']  # (B, 6)
-    true_lin = accel_all[:, :3]
-    true_ang = accel_all[:, 3:]
-    thrust = batch['thrust']  # (B, 6)
+    pw, imu = batch["power_window"], batch["imu_window"]
+    # features: 将 power_window 与 imu 拼接成 (B, W*14)
+    features = torch.cat([pw, imu], dim=2).flatten(1)
 
-    return features.float(), true_lin.float(), true_ang.float(), thrust.float()
+    accel = batch["accel"]
+    lin_t, ang_t = accel[:, :3], accel[:, 3:]
+    thrust = batch["thrust"]
+    return features.float(), lin_t.float(), ang_t.float(), thrust.float()
 
 
-def custom_train_model(model, criterion, train_loader, epochs, lr, weight_decay, grad_clip, scheduler=None):
-    """
-    训练模型，支持混合精度、梯度裁剪和学习率调度。
-
-    参数：
-      - model: 待训练模型
-      - criterion: 物理感知损失函数（此处要求调用格式为:
-                   (pred_lin, true_lin, pred_ang, true_ang, tau, M, D)）
-      - train_loader: 训练 DataLoader（返回字典）
-      - epochs, lr, weight_decay, grad_clip: 训练超参数
-      - scheduler: 学习率调度器（可选）
-
-    返回：
-      - model: 训练后的模型
-      - train_losses: 每个 epoch 的平均损失列表
-    """
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scaler = GradScaler()  # 混合精度训练
-    train_losses = []
-    model.train()
+# ------------------------------------------------------------------
+# 3. 训练
+# ------------------------------------------------------------------
+def custom_train_model(
+        model, criterion, train_loader,
+        epochs, lr, weight_decay, grad_clip,
+        scheduler=None, *, step_per_batch=False
+):
     device = next(model.parameters()).device
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-    for epoch in range(epochs):
-        running_loss = 0.0
-        for batch in train_loader:
-            features, true_lin, true_ang, thrust = process_batch(batch, device)
-            optimizer.zero_grad()
-            with autocast():
-                # 现在模型返回 4 个值
-                pred_lin, pred_ang, M, D = model(features, thrust)
-                # 此处假设我们使用 thrust 作为 tau
-                loss = criterion(pred_lin, true_lin, pred_ang, true_ang, thrust, M, D)
+    # 是否启用自动混合精度
+    amp_enabled = torch.cuda.is_available() and device.type == "cuda"
+    scaler = amp.GradScaler(enabled=amp_enabled)
+
+    train_losses = []
+
+    for ep in range(1, epochs + 1):
+        model.train()
+        running_loss, total_samples = 0.0, 0
+
+        # 循环遍历所有 batch
+        for batch_idx, batch in enumerate(train_loader, start=1):
+            feat, lin_t, ang_t, tau = process_batch(batch, device)
+
+            optimizer.zero_grad(set_to_none=True)
+            # 保持 tau 的数据类型与 feat 一致
+            tau = tau.to(feat.dtype)
+
+            ctx = amp.autocast(device_type="cuda") if amp_enabled else nullcontext()
+            with ctx:
+                out = model(feat, tau)
+                # 假设模型输出 (pred_lin, pred_ang, M, D)
+                pred_lin, pred_ang, M, D, v_pred = out
+                loss = criterion(pred_lin, lin_t, pred_ang, ang_t, tau, M, D, v_pred)
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"[WARN] Epoch {ep} Batch {batch_idx}: NaN/Inf loss — skipping batch")
+                continue
+
             scaler.scale(loss).backward()
-            if grad_clip is not None:
-                scaler.unscale_(optimizer)
+            scaler.unscale_(optimizer)
+            if grad_clip:
                 nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             scaler.step(optimizer)
             scaler.update()
-            running_loss += loss.item() * features.size(0)
-        epoch_loss = running_loss / len(train_loader.dataset)
-        train_losses.append(epoch_loss)
-        print(f"Epoch [{epoch + 1}/{epochs}] - Loss: {epoch_loss:.6f}")
-        if scheduler is not None:
+
+            bs = feat.size(0)
+            running_loss += loss.item() * bs
+            total_samples += bs
+
+            # 可打印每个 batch 的 loss 信息（可选）
+            #if batch_idx % 10 == 0:
+             #   print(f"Epoch {ep} Batch {batch_idx}: Loss = {loss.item():.6f}")
+
+            if scheduler and step_per_batch:
+                scheduler.step()
+
+        if scheduler and not step_per_batch:
             scheduler.step()
+
+        epoch_loss = running_loss / max(total_samples, 1)
+        train_losses.append(epoch_loss)
+        print(f"Epoch [{ep:3d}/{epochs}]  Loss: {epoch_loss:.6f}")
+
     return model, train_losses
 
 
-def validate_model(model, criterion, val_loader):
+# ------------------------------------------------------------------
+# 4. 验证
+# ------------------------------------------------------------------
+def validate_model(model: nn.Module, criterion: nn.Module, val_loader) -> float:
     """
-    在验证集上评估模型，返回平均 loss。
+    验证模型：
+      - 模型处于 eval 模式；
+      - 采用自动混合精度进行计算（如果可用）；
+      - 对每个 batch 计算损失并累积；
+      - 返回平均验证损失。
 
     参数：
-      - model: 待评估模型
-      - criterion: 损失函数，要求接受 (pred_lin, true_lin, pred_ang, true_ang, tau, M, D)
-      - val_loader: 验证 DataLoader
+      model: 模型实例
+      criterion: 损失函数
+      val_loader: 验证数据加载器
+
     返回：
-      - avg_loss (float): 验证集上的平均 loss
+      平均验证损失 (float)
     """
     model.eval()
     device = next(model.parameters()).device
-    total_loss = 0.0
-    sample_count = 0
+    amp_enabled = torch.cuda.is_available() and device.type == "cuda"
+
+    total_loss, total_samples = 0.0, 0
     with torch.no_grad():
         for batch in val_loader:
-            features, true_lin, true_ang, thrust = process_batch(batch, device)
-            pred_lin, pred_ang, M, D = model(features, thrust)
-            loss = criterion(pred_lin, true_lin, pred_ang, true_ang, thrust, M, D)
-            batch_size = batch['accel'].size(0)
-            total_loss += loss.item() * batch_size
-            sample_count += batch_size
-    avg_loss = total_loss / sample_count if sample_count > 0 else 0.0
+            # 处理数据：feat, lin_t, ang_t, tau 均已发送到相应 device 上
+            feat, lin_t, ang_t, tau = process_batch(batch, device)
+            tau = tau.to(feat.dtype)
+
+            # 根据设备情况选择自动混合精度上下文
+            ctx = amp.autocast(device_type="cuda") if amp_enabled else nullcontext()
+            with ctx:
+                # 此处设 return_v_pred=True 保证返回 5 个输出（包括 v_pred）
+                pred_lin, pred_ang, M, D, v_pred = model(feat, tau, return_v_pred=True)
+                loss = criterion(pred_lin, lin_t, pred_ang, ang_t, tau, M, D, v_pred)
+
+            bs = feat.size(0)
+            total_loss += loss.item() * bs
+            total_samples += bs
+
+    avg_loss = total_loss / max(total_samples, 1)
+    print(f"Validation Loss: {avg_loss:.6f}")
     return avg_loss

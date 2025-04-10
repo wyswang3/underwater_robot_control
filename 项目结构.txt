@@ -11,10 +11,12 @@ underwater_robot_control/
 │   ├── filters.py            # 滤波工具
 │   ├── visualization.py      # 可视化工具
 │   └── dataset.py            # 加载预处理数据并恢复原始窗口模式
+    └── training.py           # 训练函数与模型评估函数设计
 ├── config.py                 # 配置文件
 ├── train.py                  # 训练脚本
 ├── evaluate.py               # 评估脚本
 └── requirements.txt          # 依赖库
+
 # 激活服务器虚拟环境：conda activate /home/furui/pzy/wys_lstm/wyswang3_env
 #git checkout -b motor-reversal-adjustment
 #git status

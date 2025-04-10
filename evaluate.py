@@ -7,11 +7,10 @@ from config import Config
 cfg = Config()
 
 # 更新导入新的网络结构和损失函数
-from models.dynamics_net import BetterHydroNet, HydroParamEstimator, PhysicsAwareLoss
-from utils.preprocessing import load_thrust_allocation_matrix
+from models.dynamics_net import BetterHydroNet, PhysicsAwareLoss
+from utils.preprocessing import load_thrust_allocation_matrix  # 如有需要，保留或删除
 from utils.dataset import PreprocessedDataset
-
-from utils.training import validate_model
+from utils.training import validate_model  # 假设该函数已更新，能够处理模型返回的 v_pred 参数
 
 def main(args):
     device = torch.device(cfg.device.DEVICE)
@@ -31,7 +30,7 @@ def main(args):
         num_workers=cfg.training.NUM_WORKERS
     )
 
-    # 构造网络模型（与训练时一致）
+    # 构造网络模型（与训练时保持一致）
     model = BetterHydroNet(
         window_size=cfg.training.WINDOW_SIZE,
         input_dim=cfg.training.INPUT_DIM,
@@ -48,8 +47,27 @@ def main(args):
     model.load_state_dict(state_dict)
 
     # 初始化物理感知损失函数
-    criterion = PhysicsAwareLoss( inertia=torch.eye(3).to(device), lambda_phy=0.4)
+    # 使用配置文件中的参数（若不存在则使用默认值）
+    criterion = PhysicsAwareLoss(
+        lambda_phy=getattr(cfg.training, "LAMBDA_PHY", 0.4),
+        beta_reg=getattr(cfg.training, "BETA_REG", 0.1),
+        eps=getattr(cfg.training, "LOSS_EPS", 1e-6)
+    )
 
     # 调用验证函数
+    # 注意：新模型 forward 返回了 v_pred，因此 validate_model 必须提取到所有5项输出，
+    # 并在调用损失函数时传入 v_pred。
     avg_loss = validate_model(model, criterion, eval_loader)
     print("Evaluation complete, average loss: {:.6f}".format(avg_loss))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Evaluate dynamics model")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default="models/checkpoints/model_checkpoint.pt",
+        help="Path to model checkpoint"
+    )
+    args = parser.parse_args()
+    main(args)

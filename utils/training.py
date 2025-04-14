@@ -1,14 +1,26 @@
-import logging, torch, math
-import torch.nn as nn
+"""Utility functions for training/validation with AMP support (PyTorch >=2.1).
+Safe to import as `from utils.training import *`.
+"""
+from __future__ import annotations
+
+import logging
 from contextlib import nullcontext
-from torch.cuda import amp
+from typing import List
+
+import torch
+import torch.nn as nn
+from torch.optim import Optimizer
+from torch.utils.data import DataLoader
+from torch import amp  # PyTorch 2.1+ unified AMP API
 
 logger = logging.getLogger(__name__)
 
-# ╭───────────────────╮
-# │ 1.  辅助函数      │
-# ╰───────────────────╯
-def batch_to_device(obj, device):
+# -----------------------------------------------------------------------------
+# helper ----------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+def batch_to_device(obj, device: torch.device):
+    """Recursively move *obj* to *device* (non‑blocking when possible)."""
     if torch.is_tensor(obj):
         return obj.to(device, non_blocking=True)
     if isinstance(obj, dict):
@@ -18,122 +30,136 @@ def batch_to_device(obj, device):
     return obj
 
 
-def process_batch(batch, device):
-    """
-    返回:
-      power_window: (B, win, 8)
-      imu_window  : (B, win, 6)
-      target_dict : {accel:(B,6), thrust:(B,8)}
-    """
+def process_batch(batch: dict, device: torch.device):
+    """Split a raw batch into (power, imu, target‑dict)."""
     batch = batch_to_device(batch, device)
-    pw = batch["power_window"].float()
-    imu = batch["imu_window"].float()
-    accel = batch["accel"].float()
+    pw    = batch["power_window"].float()   # (B, win, 8)
+    imu   = batch["imu_window"].float()     # (B, win, 6)
     target = {
-        "accel": accel,                 # 已经是 6 维
-        "thrust": batch["thrust"].float()
+        "accel":  batch["accel"].float(),   # (B, 6)
+        "thrust": batch["thrust"].float()   # (B, 8)
     }
     return pw, imu, target
 
-# ╭───────────────────╮
-# │ 2.  训练函数      │
-# ╰───────────────────╯
-def train_one_epoch(
-        model, loader, criterion,
-        optimizer, scaler,
-        epoch, warmup_steps,
-        scheduler=None, step_per_batch=False,
-        amp_enabled=True, grad_clip=None):
+# -----------------------------------------------------------------------------
+# training loop ---------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
+def train_one_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    optimizer: Optimizer,
+    scaler: amp.GradScaler,
+    epoch: int,
+    warmup_steps: int = 0,
+    scheduler: Optimizer | None = None,
+    step_per_batch: bool = False,
+    amp_enabled: bool = True,
+    grad_clip: float | None = None,
+) -> float:
+    """Run one epoch; return average loss."""
     device = next(model.parameters()).device
     model.train()
-    running, n = 0.0, 0
+
+    running_loss, seen = 0.0, 0
     global_step = (epoch - 1) * len(loader)
 
-    for b, batch in enumerate(loader, 1):
+    for batch_idx, batch in enumerate(loader, 1):
         pw, imu, tgt = process_batch(batch, device)
 
-        # ── Warm‑up ──────────────────
+        # warm‑up lr ----------------------------------------------------------------
         global_step += 1
         if warmup_steps and global_step <= warmup_steps:
-            for g in optimizer.param_groups:
-                g["lr"] = g["initial_lr"] * global_step / warmup_steps
+            warm_ratio = global_step / warmup_steps
+            for group in optimizer.param_groups:
+                group["lr"] = group["initial_lr"] * warm_ratio
 
         optimizer.zero_grad(set_to_none=True)
 
-        ctx = amp.autocast(enabled=amp_enabled) if amp_enabled else nullcontext()
+        ctx = amp.autocast(device_type="cuda", enabled=amp_enabled) if amp_enabled else nullcontext()
         with ctx:
             out   = model(pw, imu)
-            loss  = criterion(out, tgt)           # ★ 只返回一个标量
-        if torch.isfinite(loss):
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            if grad_clip:
-                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            logger.warning(f"[Skip] epoch{epoch} batch{b} NaN/Inf loss")
+            loss  = criterion(out, tgt)
+
+        if not torch.isfinite(loss):
+            logger.warning(f"[Skip] epoch {epoch} batch {batch_idx}: NaN/Inf loss")
             continue
+
+        # backward ------------------------------------------------------------------
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        if grad_clip is not None:
+            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        scaler.step(optimizer)
+        scaler.update()
 
         if scheduler and step_per_batch:
             scheduler.step()
 
         bs = pw.size(0)
-        running += loss.item() * bs
-        n += bs
-
-        #if b % 100 == 0:
-          #  logger.info(f"Epoch{epoch} [{b:4d}/{len(loader)}] "
-           #             f"loss {loss.item():.4f} lr {optimizer.param_groups[0]['lr']:.2e}")
+        running_loss += loss.item() * bs
+        seen += bs
 
     if scheduler and not step_per_batch:
         scheduler.step()
 
-    return running / max(n, 1)
+    return running_loss / max(seen, 1)
 
 
 def custom_train_model(
-        model, criterion, train_loader,
-        epochs, optimizer, scheduler=None,
-        warmup_steps=0, grad_clip=None,
-        amp_enabled=True, step_per_batch=False):
-
-    device = next(model.parameters()).device
+    model: nn.Module,
+    criterion: nn.Module,
+    train_loader: DataLoader,
+    epochs: int,
+    optimizer: Optimizer,
+    scheduler: Optimizer | None = None,
+    warmup_steps: int = 0,
+    grad_clip: float | None = None,
+    amp_enabled: bool = True,
+    step_per_batch: bool = False,
+) -> List[float]:
+    """Full training routine; returns list of epoch losses."""
     scaler = amp.GradScaler(enabled=amp_enabled)
+    history: List[float] = []
 
-    history = []
     for ep in range(1, epochs + 1):
         epoch_loss = train_one_epoch(
-            model, train_loader, criterion,
-            optimizer, scaler, ep, warmup_steps,
-            scheduler, step_per_batch,
-            amp_enabled, grad_clip
+            model, train_loader, criterion, optimizer, scaler,
+            ep, warmup_steps, scheduler, step_per_batch, amp_enabled, grad_clip
         )
         history.append(epoch_loss)
-        logger.info(f"Epoch[{ep:3d}/{epochs}]  train‑loss {epoch_loss:.6f} "
-                    f"lr {optimizer.param_groups[0]['lr']:.2e}")
+        lr = optimizer.param_groups[0]["lr"]
+        logger.info(f"Epoch[{ep:3d}/{epochs}] train‑loss={epoch_loss:.6f} lr={lr:.2e}")
 
     return history
 
+# -----------------------------------------------------------------------------
+# validation ------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
-# ╭───────────────────╮
-# │ 3.  验证函数      │
-# ╰───────────────────╯
 @torch.no_grad()
-def validate_model(model, criterion, loader, amp_enabled=True):
+def validate_model(
+    model: nn.Module,
+    criterion: nn.Module,
+    loader: DataLoader,
+    amp_enabled: bool = True,
+) -> float:
+    """Evaluate *model*; return average loss."""
     model.eval()
     device = next(model.parameters()).device
-    total, n = 0.0, 0
-    ctx_mgr = amp.autocast(enabled=amp_enabled) if amp_enabled else nullcontext()
+    total, seen = 0.0, 0
+
+    ctx_mgr = amp.autocast(device_type="cuda", enabled=amp_enabled) if amp_enabled else nullcontext()
 
     for batch in loader:
         pw, imu, tgt = process_batch(batch, device)
         with ctx_mgr:
             loss = criterion(model(pw, imu), tgt)
-        total += loss.item() * pw.size(0)
-        n += pw.size(0)
+        bs = pw.size(0)
+        total += loss.item() * bs
+        seen += bs
 
-    avg = total / max(n, 1)
-    logger.info(f"[Validate] loss {avg:.6f}")
-    return avg
+    avg_loss = total / max(seen, 1)
+    logger.info(f"[Validate] loss={avg_loss:.6f}")
+    return avg_loss

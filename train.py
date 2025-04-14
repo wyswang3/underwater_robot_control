@@ -49,28 +49,32 @@ def main():
                      dtype=torch.float32, device=device)
     logger.info(f"Thrust‑matrix {T.shape}")
 
-    # 5) 网络
+    # 5) 网络 -------------------------------------------------------------
     physics_net = EnhancedPhysicsNet_LSTM(
-        thrust_matrix=T,
-        lstm_hidden_dim=cfg.training.HIDDEN_DIM,
-        num_layers=cfg.training.LSTM_LAYERS,
+        T=T,  # ← thrust_matrix → T
+        hidden=cfg.training.HIDDEN_DIM,  # ← lstm_hidden_dim → hidden
+        layers=cfg.training.LSTM_LAYERS,  # ← num_layers   → layers
         debug=cfg.DEBUG
     ).to(device)
 
     e2e_hidden_factor = getattr(cfg.training, "E2E_HIDDEN_FACTOR", 0.5)
     fusion_hidden_dim = getattr(cfg.training, "FUSION_HIDDEN_DIM", 256)
+
     e2e_net = DirectMappingNet_LSTM_Fusion(
-        hidden_dim=int(cfg.training.HIDDEN_DIM * e2e_hidden_factor),
-        num_layers=cfg.training.LSTM_LAYERS,
-        fusion_hidden_dim=fusion_hidden_dim,
+        hidden=int(cfg.training.HIDDEN_DIM * e2e_hidden_factor),
+        layers=cfg.training.LSTM_LAYERS,
+        fusion_hidden=fusion_hidden_dim,
         debug=cfg.DEBUG
     ).to(device)
 
     model = HybridDynamicsModel(physics_net, e2e_net, debug=cfg.DEBUG).to(device)
     logger.info("Hybrid model ready.")
 
-    # 6) 损失
-    criterion = EnhancedDynamicsLoss(alpha=cfg.training.LAMBDA_PHY).to(device)
+    # 6) 损失 -------------------------------------------------------------
+    criterion = EnhancedDynamicsLoss(
+        beta=cfg.training.LAMBDA_PHY,  # 正则化权重
+        linear_w=getattr(cfg.training, "LIN_WEIGHT", 0.7)
+    ).to(device)
 
     # 7) 数据
     ds_full = PreprocessedDataset(

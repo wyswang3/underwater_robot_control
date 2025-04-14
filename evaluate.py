@@ -57,18 +57,18 @@ def evaluate_model(ckpt: Union[str, os.PathLike]) -> None:
     )
 
     physics_net = EnhancedPhysicsNet_LSTM(
-        thrust_matrix=T,
-        lstm_hidden_dim=cfg.training.HIDDEN_DIM,
-        num_layers=cfg.training.LSTM_LAYERS,
+        T=T,  # ★ 用 T=
+        hidden=cfg.training.HIDDEN_DIM,
+        layers=cfg.training.LSTM_LAYERS,
         debug=cfg.DEBUG
-    ).to(device)
+    )
 
     e2e_hidden_factor = getattr(cfg.training, "E2E_HIDDEN_FACTOR", 0.5)
     fusion_hidden_dim = getattr(cfg.training, "FUSION_HIDDEN_DIM", 256)
     e2e_net = DirectMappingNet_LSTM_Fusion(
-        hidden_dim=int(cfg.training.HIDDEN_DIM * e2e_hidden_factor),
-        num_layers=cfg.training.LSTM_LAYERS,
-        fusion_hidden_dim=fusion_hidden_dim,
+        hidden=int(cfg.training.HIDDEN_DIM * e2e_hidden_factor),  # hidden_dim →
+        layers=cfg.training.LSTM_LAYERS,  # num_layers →
+        fusion_hidden=fusion_hidden_dim,  # fusion_hidden_dim →
         debug=cfg.DEBUG
     ).to(device)
 
@@ -83,8 +83,11 @@ def evaluate_model(ckpt: Union[str, os.PathLike]) -> None:
     model.load_state_dict(torch.load(ckpt, map_location=device), strict=True)
     logger.info(f"Loaded checkpoint: {ckpt}")
 
-    # 4) 损失函数
-    criterion = EnhancedDynamicsLoss(alpha=cfg.training.LAMBDA_PHY).to(device)
+    # 4) 损失 -------------------------------------------------------------
+    criterion = EnhancedDynamicsLoss(
+        beta=cfg.training.LAMBDA_PHY,  # 正则化权重
+        linear_w=getattr(cfg.training, "LIN_WEIGHT", 0.7)
+    ).to(device)
 
     # 5) 验证
     avg_loss = validate_model(model, criterion, loader, amp_enabled=(device.type == "cuda"))

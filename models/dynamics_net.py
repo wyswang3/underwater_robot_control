@@ -1,236 +1,253 @@
+#!/usr/bin/env python
+#models/dynamics_net.py
 import logging
+from typing import Any, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from utils.torch_helper import eye_like, zeros_like_shape
+
+# -----------------------------------------------------------------------------
+# logging
+# -----------------------------------------------------------------------------
 from utils.log_helper import setup_logging
 setup_logging()
+logger = logging.getLogger(__name__)
 
-import logging
-logger = logging.getLogger(__name__)   # 仅这一行即可
-#############################################
-# 基础激活函数及辅助函数
-#############################################
-class Swish(nn.Module):
-    def forward(self, x):
-        return x * torch.sigmoid(x)
+# -----------------------------------------------------------------------------
+# helpers (dtype / device safe)
+# -----------------------------------------------------------------------------
 
-def skew_symmetric(v):
-    B = v.shape[0]
+class Swish(nn.SiLU):
+    """Alias kept for backward‑compatibility."""
+    pass
+
+
+def skew_symmetric(v: torch.Tensor) -> torch.Tensor:
+    """Batch‑wise 3×3 skew‑symmetric matrices from (B,3) vectors."""
+    B, dtype, device = v.size(0), v.dtype, v.device
     vx, vy, vz = v[:, 0], v[:, 1], v[:, 2]
-    zeros = torch.zeros_like(vx)
-    return torch.stack([
-        zeros, -vz, vy,
-        vz, zeros, -vx,
-        -vy, vx, zeros
-    ], 1).view(B, 3, 3)
+    z = torch.zeros_like(vx)
+    return torch.stack(
+        [z, -vz, vy,
+         vz, z, -vx,
+         -vy, vx, z], 1).view(B, 3, 3).to(dtype)
 
-#############################################
-# Safety helpers
-#############################################
 
-def safe_slice(t: torch.Tensor, *slices, name="tensor"):
+# -----------------------------------------------------------------------------
+# safety utils
+# -----------------------------------------------------------------------------
+
+def safe_slice(t: torch.Tensor, *slices, name: str = "tensor") -> torch.Tensor:
     out = t.__getitem__(slices)
     if out.dim() == 0:
         logger.error(f"[SAFE] {name} became 0‑d, auto‑unsqueeze → shape (1,)")
         out = out.unsqueeze(0)
     return out
 
-def assert_tensor2d(t, where=""):
+
+def assert_tensor2d(t: torch.Tensor, where: str = "") -> None:
     assert t.dim() == 2, f"[ASSERT] expect 2‑D tensor in {where}, got {t.shape}"
 
-#############################################
-# SPD / Diagonal nets
-#############################################
+
+# -----------------------------------------------------------------------------
+# matrix nets
+# -----------------------------------------------------------------------------
 class SPDMatrixNet(nn.Module):
-    def __init__(self, input_dim, size, diag_eps=1e-4):
+    """Outputs a symmetric positive‑definite matrix via *LL^T*."""
+
+    def __init__(self, in_dim: int, n: int, diag_eps: float = 1e-4):
         super().__init__()
-        self.size = size
-        self.diag_eps = diag_eps
+        self.n, self.eps = n, diag_eps
         self.fc = nn.Sequential(
-            nn.Linear(input_dim, 256), Swish(), nn.LayerNorm(256),
-            nn.Linear(256, size*(size+1)//2), nn.Tanh()
+            nn.Linear(in_dim, 256), Swish(), nn.LayerNorm(256),
+            nn.Linear(256, n * (n + 1) // 2), nn.Tanh(),
         )
         for m in self.fc:
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight)
                 nn.init.zeros_(m.bias)
 
-    def forward(self, x):
-        B = x.size(0)
-        tril = self.fc(x)
-        idx = torch.tril_indices(self.size, self.size, device=x.device)
-        L = torch.zeros(B, self.size, self.size, device=x.device)
-        L[:, idx[0], idx[1]] = tril
-        diag = F.softplus(L.diagonal(dim1=1, dim2=2)) + self.diag_eps
-        L = L - torch.diag_embed(L.diagonal(dim1=1, dim2=2)) + torch.diag_embed(diag)
-        out = L @ L.transpose(1, 2)
-        logger.debug(f"SPDMatrixNet output shape: {out.shape}")
-        return out
+        idx = torch.tril_indices(n, n)
+        self.register_buffer("tri_idx", idx, persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, dtype, device = x.size(0), x.dtype, x.device
+        tril = self.fc(x).to(dtype)
+        L = torch.zeros(B, self.n, self.n, dtype=dtype, device=device)
+        L[:, self.tri_idx[0], self.tri_idx[1]] = tril
+
+        diag = F.softplus(torch.diagonal(L, dim1=1, dim2=2)) + self.eps
+        main_diag = torch.diagonal(L, dim1=1, dim2=2)  # offset=0
+        L = L - torch.diag_embed(main_diag) + torch.diag_embed(diag)
+        return L @ L.transpose(1, 2)
+
 
 class DiagonalMatrixNet(nn.Module):
-    def __init__(self, input_dim, size):
+    def __init__(self, in_dim: int, n: int):
         super().__init__()
-        self.fc = nn.Linear(input_dim, size)
+        self.fc = nn.Linear(in_dim, n)
         nn.init.kaiming_normal_(self.fc.weight)
         nn.init.zeros_(self.fc.bias)
 
-    def forward(self, x):
-        out = torch.diag_embed(torch.exp(self.fc(x)))
-        logger.debug(f"DiagonalMatrixNet output shape: {out.shape}")
-        return out
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.diag_embed(torch.exp(self.fc(x)))
 
-#############################################
-# Encoders
-#############################################
+
+# -----------------------------------------------------------------------------
+# encoders
+# -----------------------------------------------------------------------------
 class LSTMEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers=2, dropout=0.2, bidirectional=False, debug=False):
+    def __init__(self, in_dim: int, hidden: int, layers: int = 2,
+                 dropout: float = 0.2, bidir: bool = False, debug: bool = False):
         super().__init__()
-        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True,
-                            dropout=dropout, bidirectional=bidirectional)
+        self.lstm = nn.LSTM(in_dim, hidden, layers, batch_first=True,
+                            dropout=dropout, bidirectional=bidir)
         self.dropout = nn.Dropout(dropout)
-        self.out_dim = hidden_dim * (2 if bidirectional else 1)
-        self.input_dim = input_dim
+        self.out_dim = hidden * (2 if bidir else 1)
+        self.in_dim = in_dim
         self.debug = debug
 
-    def forward(self, x):
-        assert x.size(-1) == self.input_dim, f"LSTMEncoder expect {self.input_dim}, got {x.size(-1)}"
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.size(-1) == self.in_dim, "LSTMEncoder input dim mismatch"
         if self.debug:
-            logger.debug(f"[LSTMEncoder] Input shape: {x.shape}")
+            logger.debug(f"[LSTMEncoder] in {x.shape}")
         out, _ = self.lstm(x)
-        if self.debug:
-            logger.debug(f"[LSTMEncoder] LSTM output shape: {out.shape}")
         final = self.dropout(out[:, -1, :])
         if self.debug:
-            logger.debug(f"[LSTMEncoder] Final output shape: {final.shape}")
+            logger.debug(f"[LSTMEncoder] out {final.shape}")
         return final
 
+
 class ThrustLSTM(nn.Module):
-    def __init__(self, hidden_size=64, debug=False):
+    def __init__(self, hidden: int = 64, debug: bool = False):
         super().__init__()
-        self.lstm = nn.LSTM(1, hidden_size, batch_first=True)
-        self.fc = nn.Sequential(nn.ReLU(), nn.Linear(hidden_size, 32), nn.ReLU(), nn.Linear(32, 1))
+        self.lstm = nn.LSTM(1, hidden, batch_first=True)
+        self.fc = nn.Sequential(nn.ReLU(), nn.Linear(hidden, 32), nn.ReLU(), nn.Linear(32, 1))
         self.debug = debug
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.debug:
-            logger.debug(f"[ThrustLSTM] Input shape: {x.shape}")
+            logger.debug(f"[ThrustLSTM] in {x.shape}")
         out, _ = self.lstm(x)
-        if self.debug:
-            logger.debug(f"[ThrustLSTM] LSTM output shape: {out.shape}")
         out = self.fc(out[:, -1, :])
-        if self.debug:
-            logger.debug(f"[ThrustLSTM] FC output shape: {out.shape}")
         return out
 
-#############################################
-# Direct mapping net
-#############################################
+
+# -----------------------------------------------------------------------------
+# direct mapping
+# -----------------------------------------------------------------------------
 class DirectMappingNet_LSTM_Fusion(nn.Module):
-    def __init__(self, hidden_dim=256, num_layers=2, fusion_hidden_dim=256, debug=False):
+    def __init__(self, hidden: int = 256, layers: int = 2,
+                 fusion_hidden: int = 256, debug: bool = False):
         super().__init__()
-        self.power_enc = LSTMEncoder(8, hidden_dim, num_layers, debug=debug)
-        self.imu_enc   = LSTMEncoder(6, hidden_dim, num_layers, debug=debug)
-        self.fc = nn.Sequential(nn.Linear(hidden_dim*2, fusion_hidden_dim), nn.ReLU(), nn.Linear(fusion_hidden_dim, 6))
+        self.p_enc = LSTMEncoder(8, hidden, layers, debug=debug)
+        self.i_enc = LSTMEncoder(6, hidden, layers, debug=debug)
+        self.fc = nn.Sequential(
+            nn.Linear(hidden * 2, fusion_hidden), nn.ReLU(),
+            nn.Linear(fusion_hidden, 6)
+        )
         self.debug = debug
 
-    def forward(self, pw, imu):
-        if self.debug:
-            logger.debug(f"[DirectFusion] PW {pw.shape}, IMU {imu.shape}")
-        feat = torch.cat([self.power_enc(pw), self.imu_enc(imu)], -1)
-        if self.debug:
-            logger.debug(f"[DirectFusion] fused {feat.shape}")
+    def forward(self, pw: torch.Tensor, imu: torch.Tensor) -> torch.Tensor:
+        feat = torch.cat([self.p_enc(pw), self.i_enc(imu)], -1)
         out = self.fc(feat)
         if self.debug:
             logger.debug(f"[DirectFusion] out {out.shape}")
         return out
 
-#############################################
-# Physics net
-#############################################
+
+# -----------------------------------------------------------------------------
+# physics net
+# -----------------------------------------------------------------------------
 class EnhancedPhysicsNet_LSTM(nn.Module):
-    def __init__(self, thrust_matrix, lstm_hidden_dim=512, num_layers=2, debug=False):
+    def __init__(self, T: torch.Tensor, hidden: int = 512, layers: int = 2, debug: bool = False):
         super().__init__()
-        self.register_buffer('T', thrust_matrix)  # (6,8)
-        self.enc = LSTMEncoder(14, lstm_hidden_dim, num_layers, debug=debug)
+        self.register_buffer("T", T)          # (6,8)
+        self.enc = LSTMEncoder(14, hidden, layers, debug=debug)
         self.thrust_nets = nn.ModuleList([ThrustLSTM(debug=debug) for _ in range(8)])
-        self.Mnet = SPDMatrixNet(lstm_hidden_dim, 3)
-        self.Jnet = SPDMatrixNet(lstm_hidden_dim, 3)
-        self.Dnet = DiagonalMatrixNet(lstm_hidden_dim, 6)
+        self.Mnet = SPDMatrixNet(hidden, 3)
+        self.Jnet = SPDMatrixNet(hidden, 3)
+        self.Dnet = DiagonalMatrixNet(hidden, 6)
         self.reg = nn.Parameter(torch.tensor(1e-4))
         self.debug = debug
 
-    def forward(self, pw, imu):
-        x = torch.cat([pw, imu], -1)
+    def forward(self, pw: torch.Tensor, imu: torch.Tensor) -> dict[str, torch.Tensor]:
+        x   = torch.cat([pw, imu], -1)
         enc = self.enc(x)
-        thrusts = torch.stack([net(pw[..., i].unsqueeze(-1)) for i, net in enumerate(self.thrust_nets)], 1)  # (B,8,1)
-        tau = (self.T @ thrusts).squeeze(-1)
-        M = self.Mnet(enc) + self.reg * torch.eye(3, device=enc.device)
-        J = self.Jnet(enc) + self.reg * torch.eye(3, device=enc.device)
+
+        thrusts = torch.stack([
+            net(pw[..., i].unsqueeze(-1)) for i, net in enumerate(self.thrust_nets)
+        ], 1)  # (B,8,1)
+        tau = (self.T @ thrusts).squeeze(-1)  # (B,6)
+
+        M = self.Mnet(enc) + self.reg * eye_like(enc, 3)
+        J = self.Jnet(enc) + self.reg * eye_like(enc, 3)
         D = self.Dnet(enc)
-        v_lin = imu[:, -1, :3]
-        omega = imu[:, -1, 3:]
+
+        v_lin, omega = imu[:, -1, :3], imu[:, -1, 3:]
         v6 = torch.cat([v_lin, omega], 1)
+
         B = pw.size(0)
-        In = torch.zeros(B, 6, 6, device=enc.device)
+        In = zeros_like_shape((B, 6, 6), enc)
         In[:, :3, :3] = M
         In[:, 3:, 3:] = J
-        In += 1e-6 * torch.eye(6, device=enc.device)
+        In += 1e-6 * eye_like(enc, 6)
+
         C = torch.zeros_like(In)
         C[:, :3, 3:] = -skew_symmetric(v_lin)
         C[:, 3:, 3:] = -skew_symmetric(omega)
-        acc = torch.linalg.solve(In, tau.unsqueeze(-1) - (C + D) @ v6.unsqueeze(-1)).squeeze(-1)
+
+        rhs = tau.unsqueeze(-1) - (C + D) @ v6.unsqueeze(-1)
+        acc = torch.linalg.solve(In, rhs).squeeze(-1)
         if self.debug:
             logger.debug(f"[Physics] acc {acc.shape}")
         return {"accel_pred": acc, "M": M, "J": J, "encoder_features": enc}
 
-#############################################
-# Hybrid model
-#############################################
+
+# -----------------------------------------------------------------------------
+# hybrid
+# -----------------------------------------------------------------------------
 class HybridDynamicsModel(nn.Module):
-    def __init__(self, physics_net, e2e_net, debug=False):
+    def __init__(self, pnet: nn.Module, enet: nn.Module, debug: bool = False):
         super().__init__()
-        self.pnet, self.enet = physics_net, e2e_net
+        self.pnet, self.enet = pnet, enet
         self.gate = nn.Sequential(nn.Linear(70, 64), Swish(), nn.Linear(64, 1), nn.Sigmoid())
         self.debug = debug
 
-    def forward(self, pw, imu):
+    def forward(self, pw: torch.Tensor, imu: torch.Tensor) -> torch.Tensor:
         p_out = self.pnet(pw, imu)
         e_out = self.enet(pw, imu)
-        # ... 相当于 Ellipsis，第二个参数用 slice(None, 64)
-        feat = safe_slice(
-            p_out["encoder_features"],
-            ...,  # 等价于 Ellipsis
-            slice(None, 64),  # 等价于 :64
-            name="enc_feat"
-        )
-        gate_in = torch.cat([feat, p_out['accel_pred']], 1)
+        feat = safe_slice(p_out["encoder_features"], ..., slice(None, 64), name="enc_feat")
+        gate_in = torch.cat([feat, p_out["accel_pred"]], 1)
         assert_tensor2d(gate_in, "gate_in")
         g = self.gate(gate_in)
         if self.debug:
-            logger.debug(f"[Hybrid] gate {g.mean().item():.3f}")
-        return g * p_out['accel_pred'] + (1-g) * e_out
+            logger.debug(f"[Hybrid] gate={g.mean().item():.3f}")
+        return g * p_out["accel_pred"] + (1 - g) * e_out
 
-#############################################
-# Loss
-#############################################
+
+# -----------------------------------------------------------------------------
+# loss
+# -----------------------------------------------------------------------------
 class EnhancedDynamicsLoss(nn.Module):
-    def __init__(self, alpha=1.0, beta=0.1, linear_weight=0.7):
+    def __init__(self, beta: float = 0.1, linear_w: float = 0.7):
         super().__init__()
-        self.alpha, self.beta, self.lw = alpha, beta, linear_weight
+        self.beta, self.lw = beta, linear_w
 
-    def forward(self, out, tgt):
+    def forward(self, out: Any, tgt: dict[str, torch.Tensor]) -> torch.Tensor:
         if isinstance(out, dict):
-            acc = out['accel_pred']
-            reg = -(torch.log(torch.det(out['M']).clamp_min(1e-7)).mean() +
-                    torch.log(torch.det(out['J']).clamp_min(1e-7)).mean())
+            acc = out["accel_pred"]
+            reg = -(torch.log(torch.det(out["M"]).clamp_min(1e-7)).mean() +
+                    torch.log(torch.det(out["J"]).clamp_min(1e-7)).mean())
         else:
             acc, reg = out, 0.0
-        lin = F.mse_loss(acc[:, :3], tgt['accel'][:, :3])
-        ang = F.mse_loss(acc[:, 3:], tgt['accel'][:, 3:])
-        total_loss=self.lw*lin + (1-self.lw)*ang + self.beta*reg
+
+        lin = F.mse_loss(acc[:, :3], tgt["accel"][:, :3])
+        ang = F.mse_loss(acc[:, 3:], tgt["accel"][:, 3:])
+        total_loss=self.lw * lin + (1 - self.lw) * ang + self.beta * reg
         return total_loss
-
-
 
 #############################################
 # 说明
@@ -261,4 +278,3 @@ class EnhancedDynamicsLoss(nn.Module):
    - 通过缓存 encoder 输出避免重复调用带来的异常，
    - 有助于定位“iteration over a 0-d tensor”错误。
 """
-

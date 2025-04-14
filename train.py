@@ -1,163 +1,176 @@
-# train.py
-import os
-import argparse
-import multiprocessing
-import torch
-import numpy as np
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+#!/usr/bin/env python
+import os, platform, multiprocessing, logging, argparse
+import torch, numpy as np
+from torch.optim.lr_scheduler import LambdaLR, OneCycleLR
 
-# ── 项目内部模块 ────────────────────────────────────────────────
-from config                 import Config
-from models.dynamics_net    import BetterHydroNet, PhysicsAwareLoss
-from utils.preprocessing    import load_thrust_allocation_matrix
-from utils.dataset          import PreprocessedDataset, check_dataset
-from utils.visualization    import plot_loss_curve, visualize_predictions
+# ── 项目内部模块 ─────────────────────────────────────────────
+from config import Config
+from models.dynamics_net import (
+    EnhancedPhysicsNet_LSTM,
+    EnhancedDynamicsLoss,
+    DirectMappingNet_LSTM_Fusion,
+    HybridDynamicsModel
+)
+from utils.preprocessing import load_thrust_allocation_matrix
+from utils.dataset import PreprocessedDataset, check_dataset, split_dataset
+from utils.visualization import plot_loss_curve, visualize_predictions
 from utils.random_segment_fit_utils import run_random_segment_fit
-from utils.training         import custom_train_model, validate_model
-import evaluate
+from utils.training import custom_train_model, validate_model
+from evaluate import evaluate_model
+from utils.log_helper import setup_logging
+setup_logging()
 
-# ── 划分训练与验证数据集 ─────────────────────────────────────────
-def split_dataset(dataset, ratio: float = 0.8):
-    """按 ratio 拆分为训练集与验证集。"""
-    n = len(dataset)
-    n_train = int(n * ratio)
-    n_val = n - n_train
-    return torch.utils.data.random_split(dataset, [n_train, n_val])
+import logging
+logger = logging.getLogger(__name__)   # 仅这一行即可
 
 
+
+# ╭──────────────────────────────╮
+# │           主函数             │
+# ╰──────────────────────────────╯
 def main():
-    # -------- 0. 多进程设置（Windows 兼容） ---------------------
-    multiprocessing.set_start_method("spawn", force=True)
+    # 1) 多进程
+    if platform.system() == "Windows":
+        multiprocessing.set_start_method("spawn", force=True)
 
-    # -------- 1. 读取配置 & 设置随机种子 ------------------------
+    # 2) 配置 & 随机种子
     cfg = Config()
     cfg.print_config()
-    torch.manual_seed(42)
-    np.random.seed(42)
-    # 根据配置确定设备：先检查配置指定的设备是否可用
-    if cfg.device.DEVICE.startswith("cuda"):
-        if not torch.cuda.is_available():
-            print(f"[WARN] 配置中指定的 {cfg.device.DEVICE} 不可用，自动切换到 cpu")
-            device = torch.device("cpu")
-        else:
-            device = torch.device(cfg.device.DEVICE)
-    else:
-        device = torch.device("cpu")
-    print(f"[INFO] Using device: {device}")
+    torch.manual_seed(42);  np.random.seed(42)
 
-    # -------- 2. 推力分配矩阵（仅调试，如模型已不使用可忽略） ----
-    thrust_matrix = load_thrust_allocation_matrix(cfg.paths.THRUST_MATRIX_FILE)
-    T = torch.tensor(thrust_matrix, device=device)
-    print(f"[INFO] Thrust allocation matrix shape: {T.shape}")
+    # 3) 设备
+    device = torch.device(cfg.device.DEVICE if torch.cuda.is_available() else "cpu")
+    if device.type == "cpu":
+        logger.warning("CUDA 不可用，使用 CPU")
+    logger.info(f"Using device: {device}")
 
-    # -------- 3. 构建模型 --------------------------------------
-    model = BetterHydroNet(
-        window_size = cfg.training.WINDOW_SIZE,
-        input_dim   = cfg.training.INPUT_DIM,
-        hidden_dim  = cfg.training.HIDDEN_DIM,
-        lstm_layers = cfg.training.LSTM_LAYERS,
+    # 4) 推力矩阵
+    T = torch.tensor(load_thrust_allocation_matrix(cfg.paths.THRUST_MATRIX_FILE),
+                     dtype=torch.float32, device=device)
+    logger.info(f"Thrust‑matrix {T.shape}")
+
+    # 5) 网络
+    physics_net = EnhancedPhysicsNet_LSTM(
+        thrust_matrix=T,
+        lstm_hidden_dim=cfg.training.HIDDEN_DIM,
+        num_layers=cfg.training.LSTM_LAYERS,
+        debug=cfg.DEBUG
     ).to(device)
-    print("[INFO] Model constructed.")
 
-    # -------- 4. 定义损失函数 ----------------------------------
-    # 从配置文件中读取物理损失相关参数；如没有则使用默认值
-    lambda_phy = getattr(cfg.training, "LAMBDA_PHY", 0.4)
-    criterion = PhysicsAwareLoss(lambda_phy=lambda_phy).to(device)
-    print(f"[INFO] Loss function (PhysicsAwareLoss) created with lambda_phy={lambda_phy}.")
+    e2e_hidden_factor = getattr(cfg.training, "E2E_HIDDEN_FACTOR", 0.5)
+    fusion_hidden_dim = getattr(cfg.training, "FUSION_HIDDEN_DIM", 256)
+    e2e_net = DirectMappingNet_LSTM_Fusion(
+        hidden_dim=int(cfg.training.HIDDEN_DIM * e2e_hidden_factor),
+        num_layers=cfg.training.LSTM_LAYERS,
+        fusion_hidden_dim=fusion_hidden_dim,
+        debug=cfg.DEBUG
+    ).to(device)
 
-    # -------- 5. 构建数据集与 DataLoader -----------------------
+    model = HybridDynamicsModel(physics_net, e2e_net, debug=cfg.DEBUG).to(device)
+    logger.info("Hybrid model ready.")
+
+    # 6) 损失
+    criterion = EnhancedDynamicsLoss(alpha=cfg.training.LAMBDA_PHY).to(device)
+
+    # 7) 数据
     ds_full = PreprocessedDataset(
-        features_file       = cfg.paths.TRAIN_FEATURES_FILE,
-        accel_file          = cfg.paths.TRAIN_ACCEL_LABELS_FILE,
-        angular_accel_file  = cfg.paths.TRAIN_ANGULAR_ACCEL_LABELS_FILE,
-        thrust_file         = cfg.paths.TRAIN_THRUST_LABELS_FILE,
-        window_size         = cfg.training.WINDOW_SIZE,
+        cfg.paths.TRAIN_FEATURES_FILE,
+        cfg.paths.TRAIN_ACCEL_LABELS_FILE,
+        cfg.paths.TRAIN_ANGULAR_ACCEL_LABELS_FILE,
+        cfg.paths.TRAIN_THRUST_LABELS_FILE,
+        window_size=cfg.training.WINDOW_SIZE,
+        clean_data=True
     )
-    check_dataset(ds_full, accel_threshold=1)
-    ds_train, ds_val = split_dataset(ds_full, 0.8)
-    print(f"[INFO] Dataset split: {len(ds_train)} training samples, {len(ds_val)} validation samples.")
+    check_dataset(ds_full)
+    ds_tr, ds_val = split_dataset(ds_full, 0.8)
 
-    dl_train = torch.utils.data.DataLoader(
-        ds_train,
-        batch_size  = cfg.training.BATCH_SIZE,
-        shuffle     = True,
-        num_workers = cfg.training.NUM_WORKERS,
-        pin_memory  = (device.type == "cuda"),
-    )
+    dl_tr = torch.utils.data.DataLoader(
+        ds_tr, batch_size=cfg.training.BATCH_SIZE, shuffle=True,
+        num_workers=cfg.training.NUM_WORKERS, pin_memory=device.type == "cuda")
     dl_val = torch.utils.data.DataLoader(
-        ds_val,
-        batch_size  = cfg.training.BATCH_SIZE,
-        shuffle     = False,
-        num_workers = cfg.training.NUM_WORKERS,
-        pin_memory  = (device.type == "cuda"),
-    )
-    print("[INFO] DataLoader created.")
+        ds_val, batch_size=cfg.training.BATCH_SIZE, shuffle=False,
+        num_workers=cfg.training.NUM_WORKERS, pin_memory=device.type == "cuda")
+    logger.info("DataLoader ready.")
 
-    # -------- 6. 配置学习率调度器（可选） --------------------
-    optimizer = torch.optim.AdamW(
+    # 8) 优化器 + 调度器
+    opt = torch.optim.AdamW(
         model.parameters(),
-        lr           = cfg.training.LEARNING_RATE,
-        weight_decay = cfg.training.WEIGHT_DECAY,
+        lr=cfg.training.MAX_LR,                 # OneCycle 的峰值 lr
+        weight_decay=cfg.training.WEIGHT_DECAY,
+        eps=1e-6
     )
-    scheduler = (
-        CosineAnnealingWarmRestarts(
-            optimizer,
-            T_0     = cfg.training.T_0,
-            T_mult  = cfg.training.T_MULT,
-            eta_min = cfg.training.ETA_MIN,
-        )
-        if cfg.training.LR_SCHEDULER else None
-    )
-    if scheduler:
-        print("[INFO] Learning rate scheduler configured.")
+    for g in opt.param_groups:                 # 供 warm‑up
+        g["initial_lr"] = g["lr"]
 
-    # -------- 7. 模型训练 -------------------------------------
-    print("\n=== Training ===")
-    model, train_losses = custom_train_model(
-        model, criterion, dl_train,
-        epochs       = cfg.training.NUM_EPOCHS,
-        lr           = cfg.training.LEARNING_RATE,
-        weight_decay = cfg.training.WEIGHT_DECAY,
-        grad_clip    = cfg.training.CLIP_GRAD_NORM,
-        scheduler    = scheduler,
+    scheduler, step_per_batch = None, False
+    if cfg.training.LR_SCHEDULER:
+        if cfg.training.LR_SCHEDULER_TYPE.lower() == "onecyclelr":
+            total_steps = cfg.training.NUM_EPOCHS * len(dl_tr)
+            scheduler = OneCycleLR(
+                opt,
+                max_lr=cfg.training.MAX_LR,
+                total_steps=total_steps,
+                pct_start=cfg.training.LR_SCHEDULER_PCT_START,
+                anneal_strategy="linear",
+                final_div_factor=cfg.training.MAX_LR / cfg.training.MIN_LR
+            )
+            step_per_batch = True
+            logger.info("OneCycleLR scheduler on.")
+        else:   # 简单 warm‑up
+            warm_steps = cfg.training.WARMUP_STEPS
+            scheduler = LambdaLR(opt, lambda s: min(1., (s+1)/warm_steps))
+            step_per_batch = True
+            logger.info("LambdaLR warm‑up on.")
+
+    # 9) 训练
+    logger.info("=== Train ===")
+    history = custom_train_model(
+        model, criterion, dl_tr,
+        epochs=cfg.training.NUM_EPOCHS,
+        optimizer=opt,
+        scheduler=scheduler,
+        warmup_steps=cfg.training.WARMUP_STEPS,
+        grad_clip=cfg.training.CLIP_GRAD_NORM,
+        amp_enabled=(device.type == "cuda"),
+        step_per_batch=step_per_batch
     )
 
-    # -------- 8. 保存模型与 loss 曲线 --------------------------
-    ckpt_path = os.path.join(cfg.paths.MODEL_DIR, "model_checkpoint.pt")
+    # 10) 保存
+    ckpt = os.path.join(cfg.paths.MODEL_DIR, "model.pt")
     os.makedirs(cfg.paths.MODEL_DIR, exist_ok=True)
-    torch.save(model.state_dict(), ckpt_path)
-    print(f"[INFO] Model saved to {ckpt_path}")
+    torch.save(model.state_dict(), ckpt)
+    logger.info(f"Checkpoint → {ckpt}")
 
-    plot_loss_curve(
-        train_losses,
-        save_path = os.path.join(cfg.paths.SPLITS_DIR, "training_loss.png")
-    )
-    print("[INFO] Training loss curve saved.")
+    plot_loss_curve(history,
+        save_path=os.path.join(cfg.paths.SPLITS_DIR, "train_loss.png"))
 
-    # -------- 9. 模型验证 --------------------------------------
-    val_loss = validate_model(model, criterion, dl_val)
-    print(f"[INFO] Final validation loss: {val_loss:.6f}")
+    # 11) 验证
+    validate_model(model, criterion, dl_val,
+                   amp_enabled=(device.type == "cuda"))
 
-    # -------- 10. 调用评估模块 ---------------------------------
-    print("\n=== Evaluation ===")
-    evaluate.main(argparse.Namespace(checkpoint=ckpt_path))
+    # 12) 评估脚本
+    evaluate_model(ckpt)
 
-    # -------- 11. 可视化预测结果 -------------------------------
+    # 13) 可视化
     visualize_predictions(
-        model, dl_val, device,
-        save_path = os.path.join(cfg.paths.SPLITS_DIR, "prediction_comparison.png")
+        model,
+        dl_val,  # 直接传验证集 DataLoader
+        device,
+        num_batches=2,  # 取前 2 个 batch
+        num_samples=5,  # 每 batch 可视化 5 条
+        save_path=os.path.join(cfg.paths.SPLITS_DIR, "prediction_cmp.png")
     )
-    print("[INFO] Prediction comparison visualization saved.")
 
-    # -------- 12. 随机片段拟合对比 -----------------------------
+    # 14) 随机片段拟合
     run_random_segment_fit(
-        cfg, model, ds_full, device,
-        dt               = 0.2,
-        segment_duration = 20,
-        save_path        = os.path.join(cfg.paths.SPLITS_DIR, "random_segment_comparison.png")
+        cfg,
+        model,
+        ds_full,  # Training or validation dataset object (should support indexing and len())
+        device,
+        dt=0.2,
+        segment_duration=30,
+        save_path=os.path.join(cfg.paths.SPLITS_DIR, "segment_cmp.png")
     )
-    print("[INFO] Random segment fitting visualization saved.")
-
 
 if __name__ == "__main__":
     main()

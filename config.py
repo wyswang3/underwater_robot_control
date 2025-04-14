@@ -1,10 +1,8 @@
-# config.py  ── 完全替换原文件即可
 import os
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 import torch
 from typing import Dict, Any
-
 
 # ╭─────────────────────────────╮
 # │ 1. 工具函数                 │
@@ -13,15 +11,12 @@ def _p(*parts) -> Path:
     """跨平台路径拼接（返回 pathlib.Path）。"""
     return Path(*parts).expanduser().resolve()
 
-
 def _mkdirs(*dirs: Path):
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
 
-
 def _pretty_dict(d: Dict[str, Any], indent: int = 2) -> str:
     return "\n".join(f"{' '*indent}{k:<15}: {v}" for k, v in d.items())
-
 
 # ╭─────────────────────────────╮
 # │ 2. 路径配置                 │
@@ -31,7 +26,6 @@ class PathsConfig:
     PROJECT_ROOT: Path = field(
         default_factory=lambda: _p(__file__).parent
     )
-
     # 以下字段在 __post_init__ 中生成
     TRAIN_FEATURES_FILE: Path = field(init=False)
     TRAIN_ACCEL_LABELS_FILE: Path = field(init=False)
@@ -39,7 +33,6 @@ class PathsConfig:
     TRAIN_VELOCITY_LABELS_FILE: Path = field(init=False)
     TRAIN_ANGULAR_ACCEL_LABELS_FILE: Path = field(init=False)
     THRUST_MATRIX_FILE: Path = field(init=False)
-
     MODEL_DIR: Path = field(init=False)
     LOG_DIR: Path = field(init=False)
     SPLITS_DIR: Path = field(init=False)
@@ -53,7 +46,6 @@ class PathsConfig:
         self.TRAIN_THRUST_LABELS_FILE   = data_proc / "train_thrust_labels.npy"
         self.TRAIN_VELOCITY_LABELS_FILE = data_proc / "train_velocity_labels.npy"
         self.TRAIN_ANGULAR_ACCEL_LABELS_FILE = data_proc / "train_angular_accel_labels.npy"
-
         self.THRUST_MATRIX_FILE = data_raw / "thrust_allocation_matrix.csv"
 
         self.MODEL_DIR  = self.PROJECT_ROOT / "models" / "checkpoints"
@@ -62,18 +54,23 @@ class PathsConfig:
 
         _mkdirs(self.MODEL_DIR, self.LOG_DIR, self.SPLITS_DIR)
 
-
 # ╭─────────────────────────────╮
 # │ 3. 训练超参数               │
 # ╰─────────────────────────────╯
 @dataclass
 class TrainingConfig:
-    # 原有字段…
+    # 数据及模型相关参数
     WINDOW_SIZE: int = 5
     INPUT_DIM: int = 14
     HIDDEN_DIM: int = 512
-    LSTM_LAYERS: int = 2
-    # 新增模型相关字段
+    LSTM_LAYERS: int = 3
+
+    # 网络结构参数
+    # 例如混合网络中端到端网络使用的隐藏层数及其融合层尺寸
+    E2E_HIDDEN_FACTOR: float = 0.5      # 例如端到端网络的隐藏层维度为 HIDDEN_DIM * E2E_HIDDEN_FACTOR
+    FUSION_HIDDEN_DIM: int = 256          # 门控融合网络中的隐藏层尺寸
+
+    # 模型相关（针对物理网络等）
     HYDRO_HIDDEN: int = 128
     MATRIX_DIM: int = 6
     HYDRO_MIN_DIAG: float = 1e-2
@@ -82,29 +79,29 @@ class TrainingConfig:
     RESIDUAL_DROPOUT: float = 0.4
     VELOCITY_HIDDEN: int = 128
 
-    # 可选：损失相关参数
+    # 损失相关参数
+    BASE_LOSS_TYPE: str = "mse"
     LAMBDA_PHY: float = 0.4
     BETA_REG: float = 0.1
     LOSS_EPS: float = 1e-6
-    # 训练
-    NUM_EPOCHS  : int   = 120
-    BATCH_SIZE  : int   = 32
-    LEARNING_RATE : float = 1e-5
-    WEIGHT_DECAY  : float = 1e-5
+
+    # 训练超参数
+    NUM_EPOCHS: int = 3
+    BATCH_SIZE: int = 32
+    LEARNING_RATE: float = 1e-4
+    WEIGHT_DECAY: float = 1e-4
     CLIP_GRAD_NORM: float = 1.0
-    NUM_WORKERS   : int   = 2
+    NUM_WORKERS: int = 2
 
-    # 物理损失权重（保留占位）
-    ALPHA: float = 1.0
-    BETA : float = 0.1
-    GAMMA: float = 0.01
-    DELTA: float = 0.1
-
-    # Scheduler
-    LR_SCHEDULER: bool  = True
-    T_0   : int   = 10
-    T_MULT: int   = 2
-    ETA_MIN: float = 1e-6
+    # Scheduler 参数（这里使用 OneCycleLR）
+    LR_SCHEDULER: bool = True
+    LR_SCHEDULER_TYPE: str = "OneCycleLR"
+    LR_SCHEDULER_PCT_START: float = 0.3
+    MIN_LR: float = 5e-6
+    MAX_LR: float = 5e-4
+    STEP_PER_BATCH: bool = True
+    # Warm up 参数（备用）
+    WARMUP_STEPS: int = 500
 
 
 # ╭─────────────────────────────╮
@@ -120,7 +117,6 @@ class DeviceConfig:
         )
     )
 
-
 # ╭─────────────────────────────╮
 # │ 5. 主配置                   │
 # ╰─────────────────────────────╯
@@ -131,7 +127,6 @@ class Config:
     device  : DeviceConfig   = field(default_factory=DeviceConfig)
     DEBUG   : bool           = False
 
-    # -------- 打印 --------
     def print_config(self):
         print("\n========== Config ==========")
         print("• Paths")
@@ -143,7 +138,6 @@ class Config:
         print(f"  DEVICE              : {self.device.DEVICE}")
         print(f"  DEBUG               : {self.DEBUG}")
         print("============================\n")
-
 
 # ╭─────────────────────────────╮
 # │ 6. 快速测试                 │

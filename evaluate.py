@@ -1,73 +1,109 @@
+#!/usr/bin/env python
+# evaluate.py
 import os
+import argparse
+from typing import Union
+
+from utils.log_helper import setup_logging  # 根据 cfg.DEBUG 设置日志级别
+setup_logging()
+
+import logging
 import torch
 from torch.utils.data import DataLoader
-import argparse
+
+# ── 项目内部模块 ────────────────────────────────────────────
 from config import Config
-
-cfg = Config()
-
-# 更新导入新的网络结构和损失函数
-from models.dynamics_net import BetterHydroNet, PhysicsAwareLoss
-from utils.preprocessing import load_thrust_allocation_matrix  # 如有需要，保留或删除
+from models.dynamics_net import (
+    EnhancedPhysicsNet_LSTM,
+    DirectMappingNet_LSTM_Fusion,
+    HybridDynamicsModel,
+    EnhancedDynamicsLoss
+)
+from utils.preprocessing import load_thrust_allocation_matrix
 from utils.dataset import PreprocessedDataset
-from utils.training import validate_model  # 假设该函数已更新，能够处理模型返回的 v_pred 参数
+from utils.training import validate_model
 
-def main(args):
-    device = torch.device(cfg.device.DEVICE)
+logger = logging.getLogger(__name__)
 
-    # 构造评估数据集
-    full_dataset = PreprocessedDataset(
-        features_file=cfg.paths.TRAIN_FEATURES_FILE,
-        accel_file=cfg.paths.TRAIN_ACCEL_LABELS_FILE,
-        angular_accel_file=cfg.paths.TRAIN_ANGULAR_ACCEL_LABELS_FILE,
-        thrust_file=cfg.paths.TRAIN_THRUST_LABELS_FILE,
+# ╭──────────────────────────────╮
+# │       评估主流程             │
+# ╰──────────────────────────────╯
+def evaluate_model(ckpt: Union[str, os.PathLike]) -> None:
+    cfg = Config()
+    device = torch.device(cfg.device.DEVICE if torch.cuda.is_available() else "cpu")
+    logger.info(f"Device: {device}")
+
+    # 1) 数据集
+    dataset = PreprocessedDataset(
+        cfg.paths.TRAIN_FEATURES_FILE,
+        cfg.paths.TRAIN_ACCEL_LABELS_FILE,
+        cfg.paths.TRAIN_ANGULAR_ACCEL_LABELS_FILE,
+        cfg.paths.TRAIN_THRUST_LABELS_FILE,
         window_size=cfg.training.WINDOW_SIZE
     )
-    eval_loader = DataLoader(
-        full_dataset,
+    loader = DataLoader(
+        dataset,
         batch_size=cfg.training.BATCH_SIZE,
         shuffle=False,
-        num_workers=cfg.training.NUM_WORKERS
+        num_workers=cfg.training.NUM_WORKERS,
+        pin_memory=(device.type == "cuda")
+    )
+    logger.info(f"Eval samples: {len(dataset)}")
+
+    # 2) 网络结构
+    T = torch.tensor(
+        load_thrust_allocation_matrix(cfg.paths.THRUST_MATRIX_FILE),
+        dtype=torch.float32, device=device
     )
 
-    # 构造网络模型（与训练时保持一致）
-    model = BetterHydroNet(
-        window_size=cfg.training.WINDOW_SIZE,
-        input_dim=cfg.training.INPUT_DIM,
-        hidden_dim=cfg.training.HIDDEN_DIM,
-        lstm_layers=cfg.training.LSTM_LAYERS
+    physics_net = EnhancedPhysicsNet_LSTM(
+        thrust_matrix=T,
+        lstm_hidden_dim=cfg.training.HIDDEN_DIM,
+        num_layers=cfg.training.LSTM_LAYERS,
+        debug=cfg.DEBUG
     ).to(device)
 
-    # 加载模型检查点
-    checkpoint_path = args.checkpoint
-    if not os.path.exists(checkpoint_path):
-        print("Checkpoint file not found:", checkpoint_path)
+    e2e_hidden_factor = getattr(cfg.training, "E2E_HIDDEN_FACTOR", 0.5)
+    fusion_hidden_dim = getattr(cfg.training, "FUSION_HIDDEN_DIM", 256)
+    e2e_net = DirectMappingNet_LSTM_Fusion(
+        hidden_dim=int(cfg.training.HIDDEN_DIM * e2e_hidden_factor),
+        num_layers=cfg.training.LSTM_LAYERS,
+        fusion_hidden_dim=fusion_hidden_dim,
+        debug=cfg.DEBUG
+    ).to(device)
+
+    model = HybridDynamicsModel(physics_net, e2e_net, debug=cfg.DEBUG).to(device)
+    logger.info("Model graph built.")
+
+    # 3) 加载权重
+    ckpt = os.fspath(ckpt)
+    if not os.path.isfile(ckpt):
+        logger.error(f"Checkpoint not found: {ckpt}")
         return
-    state_dict = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(state_dict)
+    model.load_state_dict(torch.load(ckpt, map_location=device), strict=True)
+    logger.info(f"Loaded checkpoint: {ckpt}")
 
-    # 初始化物理感知损失函数
-    # 使用配置文件中的参数（若不存在则使用默认值）
-    criterion = PhysicsAwareLoss(
-        lambda_phy=getattr(cfg.training, "LAMBDA_PHY", 0.4),
-        beta_reg=getattr(cfg.training, "BETA_REG", 0.1),
-        eps=getattr(cfg.training, "LOSS_EPS", 1e-6)
+    # 4) 损失函数
+    criterion = EnhancedDynamicsLoss(alpha=cfg.training.LAMBDA_PHY).to(device)
+
+    # 5) 验证
+    avg_loss = validate_model(model, criterion, loader, amp_enabled=(device.type == "cuda"))
+    print(f"\nEvaluation complete — average loss: {avg_loss:.6f}")
+
+
+# ╭──────────────────────────────╮
+# │            CLI              │
+# ╰──────────────────────────────╯
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Evaluate hybrid dynamics model")
+    parser.add_argument(
+        "-c", "--checkpoint",
+        default="models/checkpoints/model.pt",
+        help="Path to checkpoint file"
     )
-
-    # 调用验证函数
-    # 注意：新模型 forward 返回了 v_pred，因此 validate_model 必须提取到所有5项输出，
-    # 并在调用损失函数时传入 v_pred。
-    avg_loss = validate_model(model, criterion, eval_loader)
-    print("Evaluation complete, average loss: {:.6f}".format(avg_loss))
+    args = parser.parse_args()
+    evaluate_model(args.checkpoint)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate dynamics model")
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default="models/checkpoints/model_checkpoint.pt",
-        help="Path to model checkpoint"
-    )
-    args = parser.parse_args()
-    main(args)
+    main()

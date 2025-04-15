@@ -80,13 +80,20 @@ def evaluate_model(ckpt: Union[str, os.PathLike]) -> None:
     if not os.path.isfile(ckpt):
         logger.error(f"Checkpoint not found: {ckpt}")
         return
-    model.load_state_dict(torch.load(ckpt, map_location=device), strict=True)
+    state = torch.load(ckpt, map_location=device)
+    # 检查一下
+    bad = any(torch.isnan(v).any() or torch.isinf(v).any()
+              for v in state.values() if torch.is_tensor(v))
+    if bad:
+        raise RuntimeError("Checkpoint contains NaN/Inf – abort evaluation.")
+    model.load_state_dict(state, strict=True)
     logger.info(f"Loaded checkpoint: {ckpt}")
 
     # 4) 损失 -------------------------------------------------------------
     criterion = EnhancedDynamicsLoss(
         beta=cfg.training.LAMBDA_PHY,  # 正则化权重
-        linear_w=getattr(cfg.training, "LIN_WEIGHT", 0.7)
+        linear_w=getattr(cfg.training, "LIN_WEIGHT", 0.7),
+        use_reg=False
     ).to(device)
 
     # 5) 验证

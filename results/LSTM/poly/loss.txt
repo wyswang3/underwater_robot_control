@@ -1,0 +1,77 @@
+========== Config ==========
+• Paths
+  PROJECT_ROOT             : /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control
+  TRAIN_FEATURES_FILE      : /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/data/processed/train_features.npy
+  TRAIN_ACCEL_LABELS_FILE  : /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/data/processed/train_accel_labels.npy
+  TRAIN_THRUST_LABELS_FILE : /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/data/processed/train_thrust_labels.npy
+  TRAIN_VELOCITY_LABELS_FILE: /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/data/processed/train_velocity_labels.npy
+  TRAIN_ANGULAR_ACCEL_LABELS_FILE: /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/data/processed/train_angular_accel_labels.npy
+  THRUST_MATRIX_FILE       : /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/data/raw/thrust_allocation_matrix.csv
+  MODEL_DIR                : /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/models/checkpoints
+  LOG_DIR                  : /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/logs
+  SPLITS_DIR               : /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/data/splits
+• Training
+  WINDOW_SIZE    : 5
+  INPUT_DIM      : 14
+  HIDDEN_DIM     : 512
+  LSTM_LAYERS    : 2
+  E2E_HIDDEN_FACTOR: 0.5
+  FUSION_HIDDEN_DIM: 256
+  HYDRO_HIDDEN   : 128
+  MATRIX_DIM     : 6
+  HYDRO_MIN_DIAG : 0.01
+  LSTM_DROPOUT   : 0.3
+  LAYER_DROPOUT  : 0.4
+  RESIDUAL_DROPOUT: 0.4
+  VELOCITY_HIDDEN: 128
+  BASE_LOSS_TYPE : mse
+  LAMBDA_PHY     : 0.4
+  BETA_REG       : 0.1
+  LOSS_EPS       : 1e-06
+  NUM_EPOCHS     : 360
+  BATCH_SIZE     : 32
+  LEARNING_RATE  : 0.0001
+  WEIGHT_DECAY   : 0.0001
+  CLIP_GRAD_NORM : 2.0
+  NUM_WORKERS    : 2
+  LR_SCHEDULER   : True
+  LR_SCHEDULER_TYPE: poly
+  LR_SCHEDULER_PCT_START: 0.3
+  MIN_LR         : 5e-06
+  MAX_LR         : 0.0005
+  STEP_PER_BATCH : True
+  WARMUP_STEPS   : 30
+• Device
+  DEVICE              : cuda:1
+  DEBUG               : False
+============================
+
+2025-04-14 21:06:48,104 INFO: Using device: cuda:1
+2025-04-14 21:06:48,452 INFO: Thrust‑matrix torch.Size([6, 8])
+2025-04-14 21:06:48,661 INFO: Hybrid model ready.
+清理异常数据：共 223 个异常样本被剔除。
+数据集检查通过，未发现异常样本。
+2025-04-14 21:06:49,249 INFO: DataLoader ready.
+2025-04-14 21:06:50,300 INFO: Poly decay (power=2.0) + warm‑up on. warm_steps=30, total_steps=54720
+2025-04-14 21:43:04,894 INFO: Epoch[358/360] train‑loss=0.424768 lr=1.54e-08
+2025-04-14 21:43:10,957 INFO: Epoch[359/360] train‑loss=0.434531 lr=3.86e-09
+2025-04-14 21:43:16,914 INFO: Epoch[360/360] train‑loss=0.406803 lr=0.00e+00
+2025-04-14 21:43:17,012 INFO: Checkpoint → /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/models/checkpoints/model.pt
+2025-04-14 21:43:18,187 INFO: [Validate] loss=nan
+2025-04-14 21:43:18,189 INFO: Device: cuda:1
+2025-04-14 21:43:18,198 INFO: Eval samples: 6277
+2025-04-14 21:43:18,310 INFO: Model graph built.
+/home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/evaluate.py:83: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state = torch.load(ckpt, map_location=device)
+2025-04-14 21:43:18,387 INFO: Loaded checkpoint: /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/models/checkpoints/model.pt
+2025-04-14 21:43:21,488 INFO: [Validate] loss=nan
+
+Evaluation complete — average loss: nan
+RMSE per dim : [0.132  0.1711 0.1252 1.1496 1.4664 2.9139]
+MAE  per dim : [0.0842 0.1007 0.0719 0.4628 0.5175 1.0104]
+Overall RMSE : 1.4157004356384277
+Each sample covers 1.00s; selecting 30 samples (~30.0s total).
+Segment starting index: 2886
+RMSE per dimension: [0.0198 0.0367 0.0304 0.0623 0.064  0.1055]
+MAE per dimension: [0.0148 0.0305 0.0254 0.0496 0.0509 0.0884]
+Overall RMSE: 0.060218323

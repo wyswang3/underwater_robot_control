@@ -18,8 +18,9 @@ underwater_robot_control/
 └── requirements.txt          # 依赖库
 
 # 激活服务器虚拟环境：conda activate /home/furui/pzy/wys_lstm/wyswang3_env
+#conda deactivate
 #git checkout -b motor-reversal-adjustment
 #git status
 #git add .
-#git commit -m "设计了新的网络结构"
+#git commit -m "针对CUDA适配进行了调整"
 #git push -u origin motor-reversal-adjustment

@@ -86,16 +86,16 @@ class TrainingConfig:
     LOSS_EPS: float = 1e-6
 
     # 训练超参数
-    NUM_EPOCHS: int = 3
+    NUM_EPOCHS: int = 300
     BATCH_SIZE: int = 32
     LEARNING_RATE: float = 1e-4
     WEIGHT_DECAY: float = 1e-4
-    CLIP_GRAD_NORM: float = 1.0
+    CLIP_GRAD_NORM: float = 2.0
     NUM_WORKERS: int = 2
 
     # Scheduler 参数（这里使用 OneCycleLR）
     LR_SCHEDULER: bool = True
-    LR_SCHEDULER_TYPE: str = "OneCycleLR"
+    LR_SCHEDULER_TYPE: str = "cosine"
     LR_SCHEDULER_PCT_START: float = 0.3
     MIN_LR: float = 5e-6
     MAX_LR: float = 5e-4

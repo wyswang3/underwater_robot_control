@@ -2,7 +2,7 @@
 #models/dynamics_net.py
 import logging
 from typing import Any, Tuple
-
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -22,6 +22,17 @@ logger = logging.getLogger(__name__)
 class Swish(nn.SiLU):
     """Alias kept for backward‑compatibility."""
     pass
+# ---------- 数值保险丝 -------------------------------------------------
+def safe_logdet(mat: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
+    """
+    返回 log|det(mat)|，对 NaN / Inf 做裁剪，保证不会产生 NaN。
+    """
+    sign, logabs = torch.linalg.slogdet(mat)          # 更稳
+    logabs = torch.nan_to_num(logabs, nan=0.0, posinf=50.0, neginf=-50.0)
+    logabs = logabs.clamp(min=math.log(eps))          # 下限裁剪
+    # 若 sign<=0（数值不正定），给一个常数惩罚  +5
+    penalty = (sign <= 0).float() * 5.0
+    return logabs + penalty
 
 
 def skew_symmetric(v: torch.Tensor) -> torch.Tensor:
@@ -193,14 +204,15 @@ class EnhancedPhysicsNet_LSTM(nn.Module):
         In = zeros_like_shape((B, 6, 6), enc)
         In[:, :3, :3] = M
         In[:, 3:, 3:] = J
-        In += 1e-6 * eye_like(enc, 6)
+        In += 1e-4 * eye_like(enc, 6)       # 从 1e‑6 提升两级
 
         C = torch.zeros_like(In)
         C[:, :3, 3:] = -skew_symmetric(v_lin)
         C[:, 3:, 3:] = -skew_symmetric(omega)
 
         rhs = tau.unsqueeze(-1) - (C + D) @ v6.unsqueeze(-1)
-        acc = torch.linalg.solve(In, rhs).squeeze(-1)
+        # --- 修复写法 1：临时升精度 -----------------------------
+        acc = torch.linalg.solve(In.float(), rhs.float()).to(In.dtype).squeeze(-1)
         if self.debug:
             logger.debug(f"[Physics] acc {acc.shape}")
         return {"accel_pred": acc, "M": M, "J": J, "encoder_features": enc}
@@ -228,22 +240,34 @@ class HybridDynamicsModel(nn.Module):
         return g * p_out["accel_pred"] + (1 - g) * e_out
 
 
-# -----------------------------------------------------------------------------
-# loss
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------------ #
+# 主损失                                                             #
+# ------------------------------------------------------------------ #
 class EnhancedDynamicsLoss(nn.Module):
-    def __init__(self, beta: float = 0.1, linear_w: float = 0.7):
+    """
+    total = linear_w * MSE_lin + (1-linear_w) * MSE_ang + beta * REG
+    REG   = -[ log|det(M)| + log|det(J)| ]      (可选)
+    """
+    def __init__(self,
+                 beta: float = 0.1,
+                 linear_w: float = 0.7,
+                 use_reg: bool = True):
         super().__init__()
-        self.beta, self.lw = beta, linear_w
+        self.beta, self.lw, self.use_reg = beta, linear_w, use_reg
 
-    def forward(self, out: Any, tgt: dict[str, torch.Tensor]) -> torch.Tensor:
+    def forward(self, out, tgt):
+        # 1) 预测 & 正则
         if isinstance(out, dict):
             acc = out["accel_pred"]
-            reg = -(torch.log(torch.det(out["M"]).clamp_min(1e-7)).mean() +
-                    torch.log(torch.det(out["J"]).clamp_min(1e-7)).mean())
+            if self.use_reg:
+                reg = -(safe_logdet(out["M"]).mean() +
+                        safe_logdet(out["J"]).mean())
+            else:
+                reg = 0.0
         else:
             acc, reg = out, 0.0
 
+        # 2) MSE
         lin = F.mse_loss(acc[:, :3], tgt["accel"][:, :3])
         ang = F.mse_loss(acc[:, 3:], tgt["accel"][:, 3:])
         total_loss=self.lw * lin + (1 - self.lw) * ang + self.beta * reg

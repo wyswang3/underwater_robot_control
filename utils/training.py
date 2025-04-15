@@ -85,6 +85,12 @@ def train_one_epoch(
         if not torch.isfinite(loss):
             logger.warning(f"[Skip] epoch {epoch} batch {batch_idx}: NaN/Inf loss")
             continue
+        if torch.isnan(loss) or torch.isinf(loss):
+            logger.error(f"[NaN] epoch={epoch} batch={batch_idx}  lr={optimizer.param_groups[0]['lr']:.2e}")
+            for n, p in model.named_parameters():
+                if torch.isnan(p).any() or torch.isinf(p).any():
+                    logger.error(f"  param {n} has NaN/Inf")
+            raise RuntimeError("NaN detected – aborting to keep checkpoint clean")
 
         # backward ------------------------------------------------------------------
         scaler.scale(loss).backward()

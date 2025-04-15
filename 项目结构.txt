@@ -13,3 +13,11 @@ underwater_robot_control/
 ├── train.py                  # 训练脚本
 ├── evaluate.py               # 评估脚本
 └── requirements.txt          # 依赖库
+
+# 激活服务器虚拟环境：conda activate /home/furui/pzy/wys_lstm/wyswang3_env
+#conda deactivate
+#git checkout -b new-feature-branch
+#git status
+#git add .
+#git commit -m "进行了新的可视化分析"
+#git push -u origin new-feature-branch

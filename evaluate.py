@@ -132,3 +132,21 @@ def main(args):
     print("开始评估……")
     avg_loss = validate_model(model, criterion, eval_loader)
     print("评估完成，平均总损失：{:.6f}".format(avg_loss))
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Evaluate dynamics model")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default="models/checkpoints/model_checkpoint.pt",
+        help="模型检查点路径",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["physics", "e2e"],
+        default="",
+        help="可选：指定评估 physics 或 e2e 子网络",
+    )
+    args = parser.parse_args()
+    main(args)

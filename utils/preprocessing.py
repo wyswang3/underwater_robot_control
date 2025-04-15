@@ -142,7 +142,6 @@ def align_motor_imu(power_path, imu_path):
             power_df, imu_df,
             on='time_in_seconds',
             direction='nearest',
-            tolerance=0.5
         )
         logging.debug(f"[DEBUG] merged shape={merged.shape}")
         if not merged.empty:
@@ -341,7 +340,7 @@ if __name__=="__main__":
         'thrust_path': os.path.join(PROJECT_ROOT, "data", "raw", "thrust_test.xlsx"),
         'power_path' : os.path.join(PROJECT_ROOT, "data", "raw", "motro_data0112.csv"),
         'imu_path'   : os.path.join(PROJECT_ROOT, "data", "raw", "downsampled_imu_data0112.csv"),
-        # 'thrust_matrix_path': os.path.join(PROJECT_ROOT, "data", "raw", "thrust_allocation_matrix.csv"),
+        #'thrust_matrix_path': os.path.join(PROJECT_ROOT, "data", "raw", "thrust_allocation_matrix.csv"),
         'save_dir'   : os.path.join(PROJECT_ROOT, "data", "processed"),
         'window_size': 5,
         'dt': 0.5

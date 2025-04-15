@@ -70,8 +70,8 @@ def plot_segment_comparison(time_axis, measured, predicted, save_path=None):
         # 否则使用默认名称，如 Axis 1, Axis 2, ...
         axis_names = [f"Axis {i + 1}" for i in range(num_axes)]
 
-    # 创建 num_axes 行，2列的子图
-    fig, axs = plt.subplots(nrows=num_axes, ncols=2, figsize=(14, 4 * num_axes))
+    # 使用 sharex="col" 保证左右两列分别共享一个 x 轴
+    fig, axs = plt.subplots(nrows=num_axes, ncols=2, figsize=(14, 4 * num_axes), sharex="col")
 
     # 如果只有一个轴，确保 axs 是二维数组
     if num_axes == 1:
@@ -82,24 +82,34 @@ def plot_segment_comparison(time_axis, measured, predicted, save_path=None):
         ax_ts = axs[i, 0]
         ax_ts.plot(time_axis, measured[:, i], 'o-', label='Measured')
         ax_ts.plot(time_axis, predicted[:, i], 's--', label='Predicted')
-        ax_ts.set_xlabel("Time (s)")
         ax_ts.set_ylabel("Value")
         # 计算该轴 RMSE
         axis_rmse = np.sqrt(np.mean((predicted[:, i] - measured[:, i]) ** 2))
         ax_ts.set_title(f"{axis_names[i]} Time Series (RMSE: {axis_rmse:.3f})")
         ax_ts.legend()
         ax_ts.grid(True)
+        # 只在最下方的子图显示 x 轴标签
+        if i == num_axes - 1:
+            ax_ts.set_xlabel("Time (s)")
+        else:
+            ax_ts.set_xlabel("")
+            ax_ts.tick_params(labelbottom=False)
 
         # 右侧：残差（预测误差）对比
         ax_res = axs[i, 1]
         residual = predicted[:, i] - measured[:, i]
         ax_res.plot(time_axis, residual, 'o-', color='purple', label='Residual')
         ax_res.axhline(0, color='red', linestyle='--')
-        ax_res.set_xlabel("Time (s)")
         ax_res.set_ylabel("Residual")
         ax_res.set_title(f"{axis_names[i]} Residual")
         ax_res.legend()
         ax_res.grid(True)
+        # 同样只在最下方显示横坐标标签
+        if i == num_axes - 1:
+            ax_res.set_xlabel("Time (s)")
+        else:
+            ax_res.set_xlabel("")
+            ax_res.tick_params(labelbottom=False)
 
     fig.tight_layout()
     if save_path is not None:
@@ -107,7 +117,6 @@ def plot_segment_comparison(time_axis, measured, predicted, save_path=None):
         fig.savefig(save_path)
     plt.show()
     plt.close(fig)
-
 
 def run_random_segment_fit(cfg, model, dataset, device, dt=0.5, segment_duration=30, save_path=None):
     """

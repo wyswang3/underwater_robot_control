@@ -14,7 +14,7 @@ from models.dynamics_net import (
     EnhancedDynamicsLoss
 )
 from utils.preprocessing import load_thrust_allocation_matrix
-from utils.visualization import plot_loss_curve, visualize_predictions,visualize_overall_error
+from utils.visualization import plot_loss_curve, visualize_global_accuracy,visualize_overall_error
 from utils.random_segment_fit_utils import run_random_segment_fit
 from utils.dataset import PreprocessedDataset
 import evaluate  # 评估脚本
@@ -259,7 +259,7 @@ def main():
 
     # 14) 预测结果可视化
     pred_plot_path = os.path.join(cfg.paths.SPLITS_DIR, "prediction_comparison.png")
-    visualize_predictions(model, val_loader, device, num_batches=2, num_samples=6, save_path=pred_plot_path)
+    visualize_global_accuracy(model, val_loader, device, save_path=pred_plot_path)
     print(f"Prediction visualization saved -> {pred_plot_path}")
     overall_error_path = os.path.join(cfg.paths.SPLITS_DIR, "overall_error.png")
     visualize_overall_error(model, val_loader, device, save_path=overall_error_path)

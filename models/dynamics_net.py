@@ -23,16 +23,18 @@ class Swish(nn.SiLU):
     """Alias kept for backward‑compatibility."""
     pass
 # ---------- 数值保险丝 -------------------------------------------------
-def safe_logdet(mat: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
+def safe_logdet(x, eps=1e-7):
     """
-    返回 log|det(mat)|，对 NaN / Inf 做裁剪，保证不会产生 NaN。
+    Compute a safe log-determinant of a matrix x.
+    Uses torch.slogdet with an epsilon added to x for numerical stability.
+    If the sign of the determinant is non-positive, returns a default large negative value.
     """
-    sign, logabs = torch.linalg.slogdet(mat)          # 更稳
-    logabs = torch.nan_to_num(logabs, nan=0.0, posinf=50.0, neginf=-50.0)
-    logabs = logabs.clamp(min=math.log(eps))          # 下限裁剪
-    # 若 sign<=0（数值不正定），给一个常数惩罚  +5
-    penalty = (sign <= 0).float() * 5.0
-    return logabs + penalty
+    # Add a small epsilon for stability
+    sign, logabsdet = torch.slogdet(x + eps)
+    # If sign is not positive, return a default negative value to penalize
+    default_value = torch.tensor(-100.0, device=x.device, dtype=x.dtype)
+    result = torch.where(sign > 0, logabsdet, default_value)
+    return result
 
 
 def skew_symmetric(v: torch.Tensor) -> torch.Tensor:
@@ -245,34 +247,55 @@ class HybridDynamicsModel(nn.Module):
 # ------------------------------------------------------------------ #
 class EnhancedDynamicsLoss(nn.Module):
     """
-    total = linear_w * MSE_lin + (1-linear_w) * MSE_ang + beta * REG
-    REG   = -[ log|det(M)| + log|det(J)| ]      (可选)
+    Loss formulation:
+      total = linear_w * MSE_lin + (1 - linear_w) * MSE_ang + beta * REG
+
+    where:
+      - MSE_lin: MSE of the first 3 dimensions (linear acceleration)
+      - MSE_ang: MSE of the last 3 dimensions (angular acceleration)
+      - REG: Regularization term = -[ log|det(M)| + log|det(J)| ] (optional)
     """
     def __init__(self,
                  beta: float = 0.1,
                  linear_w: float = 0.7,
                  use_reg: bool = True):
         super().__init__()
-        self.beta, self.lw, self.use_reg = beta, linear_w, use_reg
+        self.beta = beta
+        self.lw = linear_w
+        self.use_reg = use_reg
 
     def forward(self, out, tgt):
-        # 1) 预测 & 正则
+        # 1) Extract predictions and, if enabled, compute regularization term.
         if isinstance(out, dict):
             acc = out["accel_pred"]
             if self.use_reg:
-                reg = -(safe_logdet(out["M"]).mean() +
-                        safe_logdet(out["J"]).mean())
+                reg_M = safe_logdet(out["M"])
+                reg_J = safe_logdet(out["J"])
+                reg = -(reg_M.mean() + reg_J.mean())
             else:
                 reg = 0.0
         else:
-            acc, reg = out, 0.0
+            acc = out
+            reg = 0.0
 
-        # 2) MSE
-        lin = F.mse_loss(acc[:, :3], tgt["accel"][:, :3])
-        ang = F.mse_loss(acc[:, 3:], tgt["accel"][:, 3:])
-        total_loss=self.lw * lin + (1 - self.lw) * ang + self.beta * reg
+        # 2) Compute MSE for linear and angular parts.
+        # Use torch.nan_to_num to replace NaN with 0, positive infinities with a large value,
+        # and negative infinities with a small value.
+        # 同时使用 clamp 对数值进行限制，防止因数值过大导致平方溢出。
+        acc_lin = torch.nan_to_num(acc[:, :3], nan=0.0, posinf=1e6, neginf=-1e6).clamp(min=-1e3, max=1e3)
+        tgt_lin = torch.nan_to_num(tgt["accel"][:, :3], nan=0.0, posinf=1e6, neginf=-1e6).clamp(min=-1e3, max=1e3)
+        lin = F.mse_loss(acc_lin, tgt_lin)
+
+        acc_ang = torch.nan_to_num(acc[:, 3:], nan=0.0, posinf=1e6, neginf=-1e6).clamp(min=-1e3, max=1e3)
+        tgt_ang = torch.nan_to_num(tgt["accel"][:, 3:], nan=0.0, posinf=1e6, neginf=-1e6).clamp(min=-1e3, max=1e3)
+        ang = F.mse_loss(acc_ang, tgt_ang)
+
+        total_loss = self.lw * lin + (1 - self.lw) * ang + self.beta * reg
+
+        # 3) Safeguard: if total_loss becomes NaN, return a default value.
+        if torch.isnan(total_loss):
+            total_loss = torch.tensor(0.0, device=acc.device)
         return total_loss
-
 #############################################
 # 说明
 #############################################

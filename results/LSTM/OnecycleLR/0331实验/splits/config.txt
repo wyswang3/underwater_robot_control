@@ -1,0 +1,55 @@
+========== Config ==========
+• Paths
+  PROJECT_ROOT             : /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control
+  TRAIN_FEATURES_FILE      : /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/data/processed/train_features.npy
+  TRAIN_ACCEL_LABELS_FILE  : /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/data/processed/train_accel_labels.npy
+  TRAIN_THRUST_LABELS_FILE : /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/data/processed/train_thrust_labels.npy
+  TRAIN_VELOCITY_LABELS_FILE: /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/data/processed/train_velocity_labels.npy
+  TRAIN_ANGULAR_ACCEL_LABELS_FILE: /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/data/processed/train_angular_accel_labels.npy
+  THRUST_MATRIX_FILE       : /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/data/raw/thrust_allocation_matrix.csv
+  MODEL_DIR                : /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/models/checkpoints
+  LOG_DIR                  : /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/logs
+  SPLITS_DIR               : /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/data/splits
+• Training
+  WINDOW_SIZE    : 5
+  INPUT_DIM      : 14
+  HIDDEN_DIM     : 512
+  LSTM_LAYERS    : 2
+  E2E_HIDDEN_FACTOR: 0.5
+  FUSION_HIDDEN_DIM: 256
+  HYDRO_HIDDEN   : 128
+  MATRIX_DIM     : 6
+  HYDRO_MIN_DIAG : 0.01
+  LSTM_DROPOUT   : 0.3
+  LAYER_DROPOUT  : 0.4
+  RESIDUAL_DROPOUT: 0.3
+  VELOCITY_HIDDEN: 128
+  BASE_LOSS_TYPE : mse
+  LAMBDA_PHY     : 0.4
+  BETA_REG       : 0.1
+  LOSS_EPS       : 1e-06
+  NUM_EPOCHS     : 280
+  BATCH_SIZE     : 32
+  LEARNING_RATE  : 0.0001
+  WEIGHT_DECAY   : 0.0001
+  CLIP_GRAD_NORM : 3.0
+  NUM_WORKERS    : 2
+  LR_SCHEDULER   : True
+  LR_SCHEDULER_TYPE: OneCycleLR
+  LR_SCHEDULER_PCT_START: 0.3
+  MIN_LR         : 5e-06
+  MAX_LR         : 0.0005
+  STEP_PER_BATCH : False
+  WARMUP_STEPS   : 300
+• Device
+  DEVICE              : cuda:0
+  DEBUG               : False
+============================
+
+2025-04-16 10:11:25,996 INFO: Using device: cuda:0
+2025-04-16 10:11:26,252 INFO: Thrust‑matrix torch.Size([6, 8])
+2025-04-16 10:11:26,374 INFO: Hybrid model ready.
+清理异常数据：共 223 个异常样本被剔除。
+数据集检查通过，未发现异常样本。
+2025-04-16 10:11:26,902 INFO: DataLoader ready.
+2025-04-16 10:11:27,730 INFO: OneCycleLR scheduler on.

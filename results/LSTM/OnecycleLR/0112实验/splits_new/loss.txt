@@ -1,0 +1,25 @@
+2025-04-16 11:01:12,633 INFO: Epoch[278/280] train‑loss=0.273420 lr=5.28e-06
+2025-04-16 11:01:17,420 INFO: Epoch[279/280] train‑loss=0.284552 lr=2.73e-06
+2025-04-16 11:01:21,753 INFO: Epoch[280/280] train‑loss=0.256884 lr=1.80e-07
+2025-04-16 11:01:21,857 INFO: Checkpoint → /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/models/checkpoints/model.pt
+2025-04-16 11:01:22,973 INFO: [Validate] loss=24.114601
+2025-04-16 11:01:22,975 INFO: Device: cuda:0
+2025-04-16 11:01:22,981 INFO: Eval samples: 4975
+2025-04-16 11:01:23,043 INFO: Model graph built.
+/home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/evaluate.py:90: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state = torch.load(ckpt, map_location=device)
+2025-04-16 11:01:23,079 INFO: Loaded checkpoint: /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/models/checkpoints/model.pt
+2025-04-16 11:01:24,935 INFO: [Validate] loss=20.352978
+2025-04-16 11:01:24,935 INFO: Evaluation complete — average loss: 20.352978
+
+Evaluation complete — average loss: 20.352978
+RMSE per dimension: [0.1641 0.1765 0.1622 0.263  0.2072 0.1908]
+MAE per dimension: [0.0706 0.0657 0.0766 0.1426 0.1078 0.1119]
+Overall RMSE: 0.1970183253288269
+Prediction comparison visualization saved -> /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/data/splits/prediction_comparison.png
+Global fitting accuracy visualization saved -> /home/furui/pzy/motor/motor-reversal-adjustment/underwater_robot_control/data/splits/global_fitting_accuracy.png
+Each sample covers 1.00s; selecting 40 samples (~40.0s total).
+Segment starting index: 847
+RMSE per dimension: [0.0412 0.0185 0.0614 0.0759 0.0833 0.0648]
+MAE per dimension: [0.0299 0.0149 0.0409 0.0509 0.0584 0.041 ]
+Overall RMSE: 0.061510358

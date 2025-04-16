@@ -1,0 +1,33 @@
+========== Config ==========
+PROJECT_ROOT: /home/furui/pzy/motor/new-feature-branch/underwater_robot_control
+TRAIN_FEATURES_FILE: /home/furui/pzy/motor/new-feature-branch/underwater_robot_control/data/processed/train_features.npy
+TRAIN_ACCEL_LABELS_FILE: /home/furui/pzy/motor/new-feature-branch/underwater_robot_control/data/processed/train_accel_labels.npy
+TRAIN_THRUST_LABELS_FILE: /home/furui/pzy/motor/new-feature-branch/underwater_robot_control/data/processed/train_thrust_labels.npy
+TRAIN_VELOCITY_LABELS_FILE: /home/furui/pzy/motor/new-feature-branch/underwater_robot_control/data/processed/train_velocity_labels.npy
+TRAIN_ANGULAR_ACCEL_LABELS_FILE: /home/furui/pzy/motor/new-feature-branch/underwater_robot_control/data/processed/train_angular_accel_labels.npy
+THRUST_MATRIX_FILE: /home/furui/pzy/motor/new-feature-branch/underwater_robot_control/data/raw/thrust_allocation_matrix.csv
+MODEL_DIR: /home/furui/pzy/motor/new-feature-branch/underwater_robot_control/models/checkpoints
+LOG_DIR: /home/furui/pzy/motor/new-feature-branch/underwater_robot_control/logs
+SPLITS_DIR: /home/furui/pzy/motor/new-feature-branch/underwater_robot_control/data/splits
+
+WINDOW_SIZE: 5
+PHYSICS_HIDDEN_DIM: 512
+E2E_HIDDEN_DIM: 256
+NUM_EPOCHS: 300
+BATCH_SIZE: 32
+LEARNING_RATE: 0.0005
+WEIGHT_DECAY: 0.0001
+CLIP_GRAD_NORM: 1.0
+NUM_WORKERS: 4
+ALPHA: 1.0
+BETA: 0.1
+GAMMA: 0.01
+SCHEDULER_FACTOR: 0.5
+SCHEDULER_PATIENCE: 2
+MIN_LR: 2e-05
+
+DEVICE: cuda:3
+DEBUG: False
+Using device: cuda:3
+=== 检查数据集零值情况 ===
+数据集检查结束.

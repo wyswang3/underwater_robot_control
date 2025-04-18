@@ -289,7 +289,6 @@ def visualize_error_histograms(
     _plot_group(errors[:, :3], linear_names,  linear_bins,   'linear')
     _plot_group(errors[:, 3:], angular_names, angular_bins, 'angular')
 @torch.no_grad()
-@torch.no_grad()
 def visualize_time_series(
     preds: np.ndarray,
     tgts: np.ndarray,
@@ -330,4 +329,3 @@ def visualize_time_series(
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
-

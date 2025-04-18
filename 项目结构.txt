@@ -12,6 +12,7 @@ underwater_robot_control/
 │   ├── visualization.py      # 可视化工具
 │   └── dataset.py            # 加载预处理数据并恢复原始窗口模式
     └── training.py           # 训练函数与模型评估函数设计
+    └── predict_and_compare_lstm # 加载训练好的模型并记录拟合误差值
 ├── config.py                 # 配置文件
 ├── train.py                  # 训练脚本
 ├── evaluate.py               # 评估脚本

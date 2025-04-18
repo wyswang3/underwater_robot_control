@@ -37,7 +37,7 @@ from models.dynamics_net import (
 )
 from utils.preprocessing import load_thrust_allocation_matrix
 from utils.dataset import PreprocessedDataset
-from utils.visualization import visualize_overall_accuracy, visualize_time_series
+from utils.visualization import visualize_overall_accuracy, visualize_time_series,visualize_error_histograms
 
 
 def load_model(
@@ -143,6 +143,8 @@ def main():
     )
 
     preds, tgts = predict_all(model, loader, device)
+
+
     save_to_csv(preds, tgts, args.out_csv)
 
     visualize_overall_accuracy(
@@ -152,13 +154,22 @@ def main():
     )
     print(f"Saved global fit plot to {args.vis}")
 
-    visualize_time_series(
+    # 6) visualize time series
+    visualize_time_series(preds, tgts,
+                          time_step=0.2,
+                          save_path=args.time_series)
+    print(f">> Saved time series plot: {args.time_series}")
+    # 生成误差分布直方图
+    hist_prefix = os.path.join(cfg.paths.SPLITS_DIR, "error_hist")
+    visualize_error_histograms(
         preds, tgts,
-        time_step=args.time_step,
-        save_path=args.time_series
+        save_prefix=hist_prefix,
+        linear_bins=40,  # 线性误差 10 个箱
+        angular_bins=40,  # 角误差 40 个箱（更细）
+        tick_num=10
     )
-    print(f"Saved time series plot to {args.time_series}")
-
+    print(f">> Saved linear-error histogram:  {hist_prefix}_linear.png")
+    print(f">> Saved angular-error histogram: {hist_prefix}_angular.png")
 
 if __name__ == '__main__':
     main()

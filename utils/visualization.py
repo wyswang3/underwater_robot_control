@@ -181,47 +181,85 @@ def visualize_overall_accuracy(
 def visualize_time_series(
     preds: np.ndarray,
     tgts: np.ndarray,
-    time_step: float = 0.11,
-    save_path: Optional[str] = None
+    time_step: float,
+    save_path: str
 ) -> None:
     """
-    Plot prediction error (predicted − ground truth) over time for each of 6 dimensions.
-    Layout: 3 rows × 2 columns with meaningful axis titles.
-
-    Parameters:
-      - preds: numpy array of shape (N,6) with model predictions.
-      - tgts:  numpy array of shape (N,6) with ground truth.
-      - time_step: float, time interval between samples.
-      - save_path: optional path to save the figure.
+    Plot time-series of prediction errors (pred - true) for each dimension.
+    x-axis: time steps; layout 2 columns x 3 rows; red fine solid lines, no legend.
     """
-    N, D = preds.shape
-    if D != 6:
-        raise ValueError(f"Expected 6 dims, got {D}")
-
+    errors = preds - tgts
     axis_names = [
         "Linear Accel X", "Linear Accel Y", "Linear Accel Z",
         "Angular Accel X", "Angular Accel Y", "Angular Accel Z"
     ]
-    times = np.arange(N) * time_step
-
+    times = np.arange(len(errors)) * time_step
     fig, axes = plt.subplots(3, 2, figsize=(14, 10), sharex=True)
     axes = axes.flatten()
+
     for i, ax in enumerate(axes):
-        # 计算误差
-        error = preds[:, i] - tgts[:, i]
-        # 用红色曲线绘制误差
-        ax.plot(times, error, color='red', label='Error', linewidth=1)
-        ax.set_title(f"{axis_names[i]} Prediction Error Over Time")
-        ax.set_ylabel("Error")
-        ax.grid(True)
+        # Red fine solid line for error
+        ax.plot(
+            times,
+            errors[:, i],
+            color='red',
+            linestyle='-',
+            linewidth=0.8
+        )
+        # Zero reference line
+        ax.axhline(0, color='gray', linestyle=':', linewidth=0.8)
+        ax.set_title(f"Error in {axis_names[i]}", fontsize=10)
+        ax.set_ylabel('Error', fontsize=9)
+        ax.grid(True, alpha=0.3)
         if i in (4, 5):
-            ax.set_xlabel("Time (s)")
-        ax.legend(loc='upper right')
+            ax.set_xlabel('Time (s)', fontsize=9)
 
     plt.tight_layout()
-    if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=300)
-    plt.show()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
 
+
+@torch.no_grad()
+def visualize_error_histograms(
+    preds: np.ndarray,
+    tgts: np.ndarray,
+    save_prefix: str,
+    linear_bins: int = 20,
+    angular_bins: int = 40,
+    tick_num: int = 5
+) -> None:
+    """
+    preds/tgts: (N,6)
+    linear_bins:   number of bins for dimensions 0–2
+    angular_bins:  number of bins for dimensions 3–5
+    tick_num:      number of x‑axis ticks
+    """
+    errors = preds - tgts  # (N,6)
+
+    def _plot_group(err_group, names, bins, suffix):
+        bound = float(np.max(np.abs(err_group))) or 1.0
+        edges = np.linspace(-bound, bound, bins + 1)
+        ticks = np.linspace(-bound, bound, tick_num)
+        fig, axes = plt.subplots(1, len(names), figsize=(5 * len(names), 4))
+        axes = np.atleast_1d(axes)
+        for i, ax in enumerate(axes):
+            ax.hist(err_group[:, i], bins=edges, edgecolor='black', alpha=0.7)
+            ax.set_title(f"{names[i]} Error")
+            ax.set_xlim(-bound, bound)
+            ax.set_xticks(ticks)
+            ax.set_xlabel("Error")
+            ax.set_ylabel("Frequency")
+            ax.grid(True)
+        plt.tight_layout()
+        path = f"{save_prefix}_{suffix}.png"
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        plt.savefig(path, dpi=300)
+        plt.show()
+        plt.close()
+
+    linear_names  = ["Linear Accel X","Linear Accel Y","Linear Accel Z"]
+    angular_names = ["Angular Accel X","Angular Accel Y","Angular Accel Z"]
+
+    _plot_group(errors[:, :3], linear_names,  linear_bins,   'linear')
+    _plot_group(errors[:, 3:], angular_names, angular_bins, 'angular')

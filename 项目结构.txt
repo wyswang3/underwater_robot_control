@@ -9,6 +9,7 @@ underwater_robot_control/
 │   ├── preprocessing.py      # 数据预处理
 │   ├── filters.py            # 滤波工具
 │   └── visualization.py      # 可视化工具
+    └── dataset.py            # 数据加载工具
 ├── config.py                 # 配置文件
 ├── train.py                  # 训练脚本
 ├── evaluate.py               # 评估脚本
@@ -19,5 +20,5 @@ underwater_robot_control/
 #git checkout -b new-feature-branch
 #git status
 #git add .
-#git commit -m "进行了新的可视化分析"
+#git commit -m "调用模型对数据集进行了评估，并绘制了误差分布直方图"
 #git push -u origin new-feature-branch

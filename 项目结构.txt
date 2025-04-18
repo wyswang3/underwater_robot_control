@@ -22,5 +22,5 @@ underwater_robot_control/
 #git checkout -b motor-reversal-adjustment
 #git status
 #git add .
-#git commit -m "针对可视化分析和损失评估进行了调整"
+#git commit -m "设计了新的模块，用来可视化分析拟合误差"
 #git push -u origin motor-reversal-adjustment

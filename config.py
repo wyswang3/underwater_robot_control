@@ -60,23 +60,23 @@ class PathsConfig:
 @dataclass
 class TrainingConfig:
     # 数据及模型相关参数
-    WINDOW_SIZE: int = 5
+    WINDOW_SIZE: int = 9
     INPUT_DIM: int = 14
-    HIDDEN_DIM: int = 512
-    LSTM_LAYERS: int = 3
+    HIDDEN_DIM: int = 1024
+    LSTM_LAYERS: int = 1
 
     # 网络结构参数
     # 例如混合网络中端到端网络使用的隐藏层数及其融合层尺寸
     E2E_HIDDEN_FACTOR: float = 0.5      # 例如端到端网络的隐藏层维度为 HIDDEN_DIM * E2E_HIDDEN_FACTOR
-    FUSION_HIDDEN_DIM: int = 256          # 门控融合网络中的隐藏层尺寸
+    FUSION_HIDDEN_DIM: int = 512          # 门控融合网络中的隐藏层尺寸
 
     # 模型相关（针对物理网络等）
-    HYDRO_HIDDEN: int = 128
+    HYDRO_HIDDEN: int = 256
     MATRIX_DIM: int = 6
     HYDRO_MIN_DIAG: float = 1e-2
-    LSTM_DROPOUT: float = 0.3
+    LSTM_DROPOUT: float = 0.2
     LAYER_DROPOUT: float = 0.4
-    RESIDUAL_DROPOUT: float = 0.4
+    RESIDUAL_DROPOUT: float = 0.3
     VELOCITY_HIDDEN: int = 128
 
     # 损失相关参数
@@ -86,23 +86,22 @@ class TrainingConfig:
     LOSS_EPS: float = 1e-6
 
     # 训练超参数
-    NUM_EPOCHS: int = 300
+    NUM_EPOCHS: int = 420
     BATCH_SIZE: int = 32
     LEARNING_RATE: float = 1e-4
     WEIGHT_DECAY: float = 1e-4
-    CLIP_GRAD_NORM: float = 2.0
+    CLIP_GRAD_NORM: float = 3.0
     NUM_WORKERS: int = 2
 
     # Scheduler 参数（这里使用 OneCycleLR）
     LR_SCHEDULER: bool = True
-    LR_SCHEDULER_TYPE: str = "cosine"
+    LR_SCHEDULER_TYPE: str = "poly"
     LR_SCHEDULER_PCT_START: float = 0.3
-    MIN_LR: float = 5e-6
+    MIN_LR: float = 5e-7
     MAX_LR: float = 5e-4
-    STEP_PER_BATCH: bool = True
+    STEP_PER_BATCH: bool = True      # ★ Poly 需要 batch 级更新
     # Warm up 参数（备用）
-    WARMUP_STEPS: int = 500
-
+    WARMUP_STEPS: int = 300            # 只在 poly/自定义 Lambda 时读取
 
 # ╭─────────────────────────────╮
 # │ 4. 设备配置                 │
@@ -111,7 +110,7 @@ class TrainingConfig:
 class DeviceConfig:
     DEVICE: str = field(
         default_factory=lambda: (
-            f"cuda:{os.getenv('GPU_ID', 0)}"
+            f"cuda:{os.getenv('GPU_ID', 4)}"
             if torch.cuda.is_available()
             else "cpu"
         )

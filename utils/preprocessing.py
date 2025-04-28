@@ -224,7 +224,7 @@ def convert_accel_units(df, accel_cols=['AccX','AccY','AccZ']):
     df['AccX'] = df['AccX'] * 9.80665
     df['AccY'] = df['AccY'] * 9.80665
     # Z 轴：先减去 1g，再乘以 9.80665
-    df['AccZ'] = (df['AccZ'] - 1) * 9.80665
+    df['AccZ'] = (df['AccZ']) * 9.80665
     return df
 
 
@@ -360,7 +360,7 @@ def full_pipeline(config):
 
     # 8) 时间窗口切分
     logging.info("开始窗口切分...")
-    dt = config.get('dt', 0.2)
+    dt = config.get('dt', 0.11)
     input_cols = motor_cols + ['AccX','AccY','AccZ','AsX','AsY','AsZ']
     label_cols_acc = ['AccX','AccY','AccZ']
     label_cols_thrust = [m.replace('Power','Thrust') for m in motor_cols]
@@ -372,7 +372,7 @@ def full_pipeline(config):
         label_cols_thrust,
         motor_cols,
         T,
-        window_size=config.get('window_size', 5),
+        window_size=config.get('window_size', 9),
         step=1,
         dt=dt
     )
@@ -403,8 +403,8 @@ if __name__=="__main__":
         'imu_path'   : os.path.join(PROJECT_ROOT, "data", "raw", "imu_data_0331.csv"),
         # 'thrust_matrix_path': os.path.join(PROJECT_ROOT, "data", "raw", "thrust_allocation_matrix.csv"),
         'save_dir'   : os.path.join(PROJECT_ROOT, "data", "processed"),
-        'window_size': 5,
-        'dt': 0.2
+        'window_size': 9,
+        'dt': 0.11
     }
 
     feats, accs, thrs, vels, ang_accels, params = full_pipeline(config)

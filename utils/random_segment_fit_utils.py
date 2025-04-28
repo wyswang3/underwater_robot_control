@@ -54,69 +54,96 @@ def stack_to_device(samples: List[Dict[str, Any]], device: torch.device) -> Tupl
 # ╭─────────────────────────────────────────╮
 # │           2. Plotting Tools             │
 # ╰─────────────────────────────────────────╯
-def plot_segment(time_axis: np.ndarray, gt: np.ndarray, pred: np.ndarray, save_path: Optional[str] = None) -> None:
+def plot_segment(time_axis: np.ndarray,
+                 gt: np.ndarray,
+                 pred: np.ndarray,
+                 save_path: Optional[str] = None) -> None:
     """
-    Plot time series comparison for each acceleration axis:
-      - Left: Measured (GT) vs. Predicted (Pred) values.
-      - Right: Residuals (Predicted - Measured) over time.
-
-    If data has 6 channels, the first three are assumed to be linear acceleration (X/Y/Z) and
-    the last three are angular acceleration (X/Y/Z), with corresponding titles.
-
-    Args:
-        time_axis: 1D numpy array of time points (shape: [n_samples]).
-        gt: Ground truth data, a 2D numpy array (shape: [n_samples, n_axes]).
-        pred: Predicted data, a 2D numpy array (shape: [n_samples, n_axes]).
-        save_path: Path to save the figure. If None, the figure is shown only.
+    Plot comparison for each acceleration axis:
+      - Left: Measured vs. Predicted
+      - Right: Residual (Pred - GT)
+    All labels (xlabel/ylabel) fully aligned across subplots.
     """
+
+    # Global style
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif'],
+        'font.size': 11
+    })
+
     n_axes = gt.shape[1]
-    if n_axes == 6:
-        axis_names = [
-            "Linear Accel X", "Linear Accel Y", "Linear Accel Z",
-            "Angular Accel X", "Angular Accel Y", "Angular Accel Z"
-        ]
-    else:
-        axis_names = [f"Axis{i}" for i in range(n_axes)]
+    axis_names = (
+        ["Linear Accel X", "Linear Accel Y", "Linear Accel Z",
+         "Angular Accel X", "Angular Accel Y", "Angular Accel Z"]
+        if n_axes == 6 else
+        [f"Axis {i + 1}" for i in range(n_axes)]
+    )
 
-    # Create a subplot grid with n_axes rows and 2 columns
-    fig, axes = plt.subplots(n_axes, 2, figsize=(12, 3 * n_axes), sharex="col")
-
-    # In case only one axis exists, ensure axes is 2D
+    fig_height = 8 * n_axes / 6
+    fig, axes = plt.subplots(
+        n_axes, 2,
+        figsize=(8, fig_height),
+        sharex='col'
+    )
     if n_axes == 1:
         axes = axes.reshape(1, 2)
 
-    # Loop over each axis/dimension
+    # Manually control margins to ensure alignment
+    fig.subplots_adjust(left=0.12, right=0.95, hspace=0.4, wspace=0.3)
+
     for i in range(n_axes):
-        # Left subplot: Measured vs. Predicted
-        ax_left = axes[i, 0]
-        ax_left.plot(time_axis, gt[:, i], "o-", label="Measured", color="tab:blue")
-        ax_left.plot(time_axis, pred[:, i], "s--", label="Predicted", color="tab:orange")
-        ax_left.set_title(f"{axis_names[i]}: Measured vs Predicted")
-        ax_left.grid(True)
-        ax_left.legend()
+        # Left column
+        ax_l = axes[i, 0]
+        ax_l.plot(time_axis, gt[:, i], 'o-', color='red',
+                  linewidth=1.5, markersize=3, markerfacecolor='none',
+                  label='Measured')
+        ax_l.plot(time_axis, pred[:, i], 'o-', color='blue',
+                  linewidth=1.5, markersize=3, markerfacecolor='none',
+                  label='Predicted')
+        ax_l.set_ylabel(axis_names[i], fontsize=12)
+        ax_l.tick_params(axis='both', labelsize=11)
+        ax_l.grid(False)
+        if i == 0:
+            ax_l.legend(frameon=False, fontsize=10, loc='upper right')
+        if i == n_axes - 1:
+            ax_l.set_xlabel("Time (s)", fontsize=12)
+        else:
+            ax_l.tick_params(labelbottom=False)
 
-        # Right subplot: Residual (Predicted - Measured)
-        ax_right = axes[i, 1]
-        residual = pred[:, i] - gt[:, i]
-        ax_right.plot(time_axis, residual, "o-", label="Residual", color="purple")
-        # Horizontal reference line at 0
-        ax_right.axhline(0, color="red", linestyle="--", linewidth=1)
-        rmse_i = np.sqrt(np.mean(residual ** 2))
-        ax_right.set_title(f"{axis_names[i]} Residual (RMSE = {rmse_i:.3f})")
-        ax_right.grid(True)
-        ax_right.legend()
+        # Right column
+        ax_r = axes[i, 1]
+        resid = pred[:, i] - gt[:, i]
+        ax_r.plot(time_axis, resid, 'o-', color='purple',
+                  linewidth=1.5, markersize=4, markerfacecolor='none',
+                  label='Residual')
+        ax_r.axhline(0, color='red', linestyle='--', linewidth=1.2)
+        ax_r.set_ylabel("Residual", fontsize=12)
+        ax_r.tick_params(axis='both', labelsize=11)
+        ax_r.grid(False)
+        if i == 0:
+            ax_r.legend(frameon=False, fontsize=10, loc='upper right')
+        if i == n_axes - 1:
+            ax_r.set_xlabel("Time (s)", fontsize=12)
+        else:
+            ax_r.tick_params(labelbottom=False)
 
-    # Set x-axis label for bottom subplots
-    for col in range(2):
-        axes[-1, col].set_xlabel("Time (s)")
+    # Align left column y-labels
+    fig.align_ylabels(axes[:, 0])
 
-    plt.tight_layout()
+    # Align right column y-labels
+    fig.align_ylabels(axes[:, 1])
+
+    # Final layout tightening
+    fig.tight_layout(pad=0.8)
+
+    # Save if needed
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=300)
-    plt.show()
-    plt.close()
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
 
+    plt.show()
+    plt.close(fig)
 
 # ╭─────────────────────────────────────────╮
 # │       3. Main Function: Random Segment Fit        │
@@ -152,7 +179,8 @@ def run_random_segment_fit(
     sample_time = cfg.training.WINDOW_SIZE * dt
     n_samples = max(1, int(segment_duration / sample_time))
 
-    print(f"Each sample covers {sample_time:.2f}s; selecting {n_samples} samples (~{n_samples * sample_time:.1f}s total).")
+    print(
+        f"Each sample covers {sample_time:.2f}s; selecting {n_samples} samples (~{n_samples * sample_time:.1f}s total).")
     seg_samples, start = select_random_segment(dataset, n_samples)
     print(f"Segment starting index: {start}")
 

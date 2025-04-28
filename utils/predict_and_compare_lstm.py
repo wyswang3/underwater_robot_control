@@ -9,6 +9,7 @@ LSTM branch convenience script:
   3. Save 6-D preds vs true to CSV
   4. Produce global fit visualization (scatter + histogram)
   5. Produce time-series comparison (2×3 subplots)
+  6. (新增) Produce random-segment fit analysis & plot
 
 Usage:
     python utils/predict_and_compare_lstm.py
@@ -18,16 +19,18 @@ Or override:
       -o path/to/pred_vs_true.csv \
       -v path/to/global_fit.png \
       -t path/to/time_series.png \
-      --time_step 0.1
+      --time_step 0.1 \
+      --random_seg random_segment.png
 """
 import os
 import argparse
-from typing import Tuple
+import logging
 
 import torch
 import numpy as np
 import pandas as pd
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from config import Config
 from models.dynamics_net import (
@@ -37,17 +40,21 @@ from models.dynamics_net import (
 )
 from utils.preprocessing import load_thrust_allocation_matrix
 from utils.dataset import PreprocessedDataset
-from utils.visualization import visualize_overall_accuracy, visualize_time_series,visualize_error_histograms
+from utils.visualization import (
+    visualize_overall_accuracy,
+    visualize_time_series,
+    visualize_error_histograms
+)
+from utils.random_segment_fit_utils import run_random_segment_fit
 
+# ---------------------------------------------------------------------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
-def load_model(
-    cfg: Config,
-    checkpoint: str,
-    device: torch.device
-) -> torch.nn.Module:
-    """Build and load the hybrid LSTM model."""
+def load_model(cfg: Config, checkpoint: str, device: torch.device) -> torch.nn.Module:
     T_np = load_thrust_allocation_matrix(cfg.paths.THRUST_MATRIX_FILE)
     T = torch.tensor(T_np, dtype=torch.float32, device=device)
+
     phys = EnhancedPhysicsNet_LSTM(
         T=T,
         hidden=cfg.training.HIDDEN_DIM,
@@ -61,23 +68,18 @@ def load_model(
         debug=cfg.DEBUG
     ).to(device)
     model = HybridDynamicsModel(phys, e2e, debug=cfg.DEBUG).to(device)
-    state = torch.load(checkpoint, map_location=device)
+
+    state = torch.load(checkpoint, map_location=device, weights_only=True)
     model.load_state_dict(state)
     model.eval()
-    print(f"Loaded checkpoint: {checkpoint}")
+    logger.info("Loaded checkpoint: %s", checkpoint)
     return model
 
-
-def predict_all(
-    model: torch.nn.Module,
-    loader: DataLoader,
-    device: torch.device
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Run model on loader and return (preds, tgts) arrays of shape (N,6)."""
+def predict_all(model: torch.nn.Module, loader: DataLoader, device: torch.device):
     all_preds, all_tgts = [], []
     model.eval()
     with torch.no_grad():
-        for batch in loader:
+        for batch in tqdm(loader, desc="Predicting"):
             for k, v in batch.items():
                 if torch.is_tensor(v):
                     batch[k] = v.to(device)
@@ -86,48 +88,37 @@ def predict_all(
             all_preds.append(pred.cpu().numpy())
             all_tgts.append(batch['accel'].cpu().numpy())
     preds = np.vstack(all_preds)
-    tgts = np.vstack(all_tgts)
+    tgts  = np.vstack(all_tgts)
+    logger.info("Prediction complete: %d samples", preds.shape[0])
     return preds, tgts
 
-
-def save_to_csv(
-    preds: np.ndarray,
-    tgts: np.ndarray,
-    path: str
-) -> None:
-    """Save preds and tgts to CSV with columns pred_0..5, true_0..5."""
+def save_to_csv(preds: np.ndarray, tgts: np.ndarray, path: str):
     D = preds.shape[1]
     cols = [f'pred_{i}' for i in range(D)] + [f'true_{i}' for i in range(D)]
     df = pd.DataFrame(np.hstack([preds, tgts]), columns=cols)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    dirpath = os.path.dirname(path)
+    if dirpath:
+        os.makedirs(dirpath, exist_ok=True)
     df.to_csv(path, index=False)
-    print(f"Saved CSV to {path}")
-
+    logger.info("Saved CSV to %s", path)
 
 def main():
     cfg = Config()
     device = torch.device(cfg.device.DEVICE if torch.cuda.is_available() else 'cpu')
 
-    default_ckpt = os.path.join(cfg.paths.MODEL_DIR, 'model.pt')
-    default_csv = os.path.join(cfg.paths.SPLITS_DIR, 'pred_vs_true.csv')
-    default_vis = os.path.join(cfg.paths.SPLITS_DIR, 'global_fit.png')
-    default_ts = os.path.join(cfg.paths.SPLITS_DIR, 'time_series.png')
-
     parser = argparse.ArgumentParser(description="Predict & compare (LSTM branch)")
-    parser.add_argument('-c', '--checkpoint', default=default_ckpt,
-                        help='Model checkpoint path')
-    parser.add_argument('-o', '--out_csv', default=default_csv,
-                        help='CSV output path')
-    parser.add_argument('-v', '--vis', default=default_vis,
-                        help='Global fit plot path')
-    parser.add_argument('-t', '--time_series', default=default_ts,
-                        help='Time series plot path')
-    parser.add_argument('--time_step', type=float, default=0.11,
-                        help='Time interval for time-series plot')
+    parser.add_argument('-c','--checkpoint',  default=os.path.join(cfg.paths.MODEL_DIR,'model.pt'))
+    parser.add_argument('-o','--out_csv',     default=os.path.join(cfg.paths.SPLITS_DIR,'pred_vs_true.csv'))
+    parser.add_argument('-v','--vis',         default=os.path.join(cfg.paths.SPLITS_DIR,'global_fit.png'))
+    parser.add_argument('-t','--time_series', default=os.path.join(cfg.paths.SPLITS_DIR,'time_series.png'))
+    parser.add_argument('--time_step', type=float, default=0.11)
+    parser.add_argument('-r','--random_seg',  default=os.path.join(cfg.paths.SPLITS_DIR,'random_segment.png'))
     args = parser.parse_args()
 
+    # 1) Load model
     model = load_model(cfg, args.checkpoint, device)
 
+    # 2) Prepare dataset & loader
     ds = PreprocessedDataset(
         features_file=cfg.paths.TRAIN_FEATURES_FILE,
         accel_file=cfg.paths.TRAIN_ACCEL_LABELS_FILE,
@@ -135,41 +126,49 @@ def main():
         thrust_file=cfg.paths.TRAIN_THRUST_LABELS_FILE,
         window_size=cfg.training.WINDOW_SIZE
     )
-    loader = DataLoader(
-        ds,
-        batch_size=cfg.training.BATCH_SIZE,
-        shuffle=False,
-        num_workers=cfg.training.NUM_WORKERS
-    )
+    loader = DataLoader(ds, batch_size=cfg.training.BATCH_SIZE,
+                        shuffle=False, num_workers=cfg.training.NUM_WORKERS)
 
+    # 3) Predict
     preds, tgts = predict_all(model, loader, device)
 
-
+    # 4) Save CSV
     save_to_csv(preds, tgts, args.out_csv)
 
-    visualize_overall_accuracy(
-        model, loader, device,
-        save_path=args.vis,
-        max_samples=len(ds)
-    )
-    print(f"Saved global fit plot to {args.vis}")
+    # 5) Global fit
+    visualize_overall_accuracy(model, loader, device,
+                               save_path=args.vis,
+                               max_samples=len(ds))
+    logger.info("Saved global fit to %s", args.vis)
 
-    # 6) visualize time series
+    # 6) Time-series
     visualize_time_series(preds, tgts,
-                          time_step=0.2,
+                          time_step=args.time_step,
                           save_path=args.time_series)
-    print(f">> Saved time series plot: {args.time_series}")
-    # 生成误差分布直方图
-    hist_prefix = os.path.join(cfg.paths.SPLITS_DIR, "error_hist")
+    logger.info("Saved time-series plot to %s", args.time_series)
+
+    # 7) Random-segment fit
+    run_random_segment_fit(
+        cfg=cfg,
+        model=model,
+        dataset=ds,
+        device=device,
+        dt=args.time_step,
+        segment_duration=30,
+        save_path=args.random_seg
+    )
+    logger.info("Saved random-segment fit to %s", args.random_seg)
+
+    # 8) Error histograms
+    hist_pref = os.path.join(cfg.paths.SPLITS_DIR, "error_hist")
     visualize_error_histograms(
         preds, tgts,
-        save_prefix=hist_prefix,
-        linear_bins=40,  # 线性误差 10 个箱
-        angular_bins=40,  # 角误差 40 个箱（更细）
+        save_prefix=hist_pref,
+        linear_bins=40,
+        angular_bins=40,
         tick_num=10
     )
-    print(f">> Saved linear-error histogram:  {hist_prefix}_linear.png")
-    print(f">> Saved angular-error histogram: {hist_prefix}_angular.png")
+    logger.info("Saved error histograms to %s_[linear|angular].png", hist_pref)
 
 if __name__ == '__main__':
     main()

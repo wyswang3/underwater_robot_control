@@ -3,6 +3,7 @@ import random
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+from typing import Optional   # ← 新增这一行
 
 
 def select_random_segment(dataset, num_samples):
@@ -53,68 +54,82 @@ def predict_segment(model, segment_power, segment_imu):
     return preds
 
 
-def plot_segment_comparison(time_axis, measured, predicted, save_path=None):
-    """
-    绘制选取数据段中每个加速度轴随时间变化的对比图，包括：
-      - 左侧：测量值与预测值的时间序列对比
-      - 右侧：预测残差（预测值-测量值）随时间变化
-    如果数据有6个通道，前3个假设为线性加速度，后3个为角加速度，
-    图表标题将分别显示 "Linear Accel X/Y/Z" 和 "Angular Accel X/Y/Z" 及对应的 RMSE 值。
-    """
-    num_axes = measured.shape[1]
-    # 如果数据有6个通道，定义轴名称
-    if num_axes == 6:
-        axis_names = ["Linear Accel X", "Linear Accel Y", "Linear Accel Z",
-                      "Angular Accel X", "Angular Accel Y", "Angular Accel Z"]
-    else:
-        # 否则使用默认名称，如 Axis 1, Axis 2, ...
-        axis_names = [f"Axis {i + 1}" for i in range(num_axes)]
+def plot_segment_comparison(time_axis: np.ndarray,
+                            gt: np.ndarray,
+                            pred: np.ndarray,
+                            save_path: Optional[str] = None) -> None:
+    # 全局字体设置：Times 系列，字号 9pt
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif'],
+        'font.size': 9
+    })
 
-    # 使用 sharex="col" 保证左右两列分别共享一个 x 轴
-    fig, axs = plt.subplots(nrows=num_axes, ncols=2, figsize=(14, 4 * num_axes), sharex="col")
+    n_axes = gt.shape[1]
+    axis_names = (
+        ["Linear Accel X", "Linear Accel Y", "Linear Accel Z",
+         "Angular Accel X", "Angular Accel Y", "Angular Accel Z"]
+        if n_axes == 6 else
+        [f"Axis {i+1}" for i in range(n_axes)]
+    )
 
-    # 如果只有一个轴，确保 axs 是二维数组
-    if num_axes == 1:
-        axs = np.array([axs])
+    # 等宽两列，使用 constrained_layout 自动紧凑
+    height = 8 * n_axes / 6
+    fig, axes = plt.subplots(
+        n_axes, 2,
+        figsize=(8, height),
+        sharex='col',
+        constrained_layout=True
+    )
+    if n_axes == 1:
+        axes = axes.reshape(1, 2)
 
-    for i in range(num_axes):
-        # 左侧：时间序列对比
-        ax_ts = axs[i, 0]
-        ax_ts.plot(time_axis, measured[:, i], 'o-', label='Measured')
-        ax_ts.plot(time_axis, predicted[:, i], 's--', label='Predicted')
-        ax_ts.set_ylabel("Value")
-        # 计算该轴 RMSE
-        axis_rmse = np.sqrt(np.mean((predicted[:, i] - measured[:, i]) ** 2))
-        ax_ts.set_title(f"{axis_names[i]} Time Series (RMSE: {axis_rmse:.3f})")
-        ax_ts.legend()
-        ax_ts.grid(True)
-        # 只在最下方的子图显示 x 轴标签
-        if i == num_axes - 1:
-            ax_ts.set_xlabel("Time (s)")
+    for i in range(n_axes):
+        # 左：Measured vs Predicted
+        ax_l = axes[i, 0]
+        ax_l.plot(time_axis, gt[:, i],  'o-', color='red',
+                  linewidth=1.5, markersize=3, markerfacecolor='none',
+                  label='Measured')
+        ax_l.plot(time_axis, pred[:, i], 'o-', color='blue',
+                  linewidth=1.5, markersize=3, markerfacecolor='none',
+                  label='Predicted')
+        ax_l.set_ylabel(axis_names[i], fontsize=10)
+        ax_l.tick_params(axis='y', labelsize=10)
+        if i == 0:
+            ax_l.legend(frameon=False, fontsize=9, loc='upper right')
+        if i < n_axes - 1:
+            ax_l.tick_params(labelbottom=False)
         else:
-            ax_ts.set_xlabel("")
-            ax_ts.tick_params(labelbottom=False)
+            ax_l.set_xlabel("Time (s)", fontsize=10)
+            ax_l.tick_params(axis='x', labelsize=10)
+        ax_l.grid(False)
 
-        # 右侧：残差（预测误差）对比
-        ax_res = axs[i, 1]
-        residual = predicted[:, i] - measured[:, i]
-        ax_res.plot(time_axis, residual, 'o-', color='purple', label='Residual')
-        ax_res.axhline(0, color='red', linestyle='--')
-        ax_res.set_ylabel("Residual")
-        ax_res.set_title(f"{axis_names[i]} Residual")
-        ax_res.legend()
-        ax_res.grid(True)
-        # 同样只在最下方显示横坐标标签
-        if i == num_axes - 1:
-            ax_res.set_xlabel("Time (s)")
+        # 右：Residual
+        ax_r = axes[i, 1]
+        resid = pred[:, i] - gt[:, i]
+        ax_r.plot(time_axis, resid, 'o-', color='purple',
+                  linewidth=1.5, markersize=2, markerfacecolor='none',
+                  label='Residual')
+        ax_r.axhline(0, color='red', linestyle='--', linewidth=1.5)
+        ax_r.set_ylabel("Residual", fontsize=10)
+        ax_r.tick_params(axis='y', labelsize=10)
+        if i == 0:
+            ax_r.legend(frameon=False, fontsize=9, loc='upper right')
+        if i < n_axes - 1:
+            ax_r.tick_params(labelbottom=False)
         else:
-            ax_res.set_xlabel("")
-            ax_res.tick_params(labelbottom=False)
+            ax_r.set_xlabel("Time (s)", fontsize=10)
+            ax_r.tick_params(axis='x', labelsize=10)
+        ax_r.grid(False)
 
-    fig.tight_layout()
-    if save_path is not None:
+        # 对齐左列 y‐labels
+        fig.align_ylabels(axes[:, 0])
+        # 再微调一下边缘留白
+        fig.tight_layout(pad=0.5)
+
+    if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        fig.savefig(save_path)
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.show()
     plt.close(fig)
 

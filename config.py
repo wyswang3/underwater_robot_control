@@ -52,12 +52,12 @@ class TrainingConfig:
     训练相关的超参数，包括网络结构、训练轮数、batch 大小、学习率及调度器参数等。
     """
     # 窗口大小及隐藏层维度（可分别针对物理网络和端到端网络设定）
-    WINDOW_SIZE: int = 5
+    WINDOW_SIZE: int = 9
     PHYSICS_HIDDEN_DIM: int = 512
     E2E_HIDDEN_DIM: int = 256
 
     # 训练参数
-    NUM_EPOCHS: int = 300
+    NUM_EPOCHS: int = 360
     BATCH_SIZE: int = 32
     LEARNING_RATE: float = 5e-4
     WEIGHT_DECAY: float = 1e-4
@@ -83,7 +83,7 @@ class DeviceConfig:
     则使用 'cuda:3' (代表第4块 GPU)，否则使用 CPU。
     """
     DEVICE: str = field(default_factory=lambda: (
-        "cuda:3" if os.environ.get("USE_CUDA", "1") == "1"
+        "cuda:4" if os.environ.get("USE_CUDA", "1") == "1"
                     and os.path.exists("/dev/nvidia3")
         else "cpu"
     ))

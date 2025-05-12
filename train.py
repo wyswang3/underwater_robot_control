@@ -225,7 +225,7 @@ def main():
         optimizer,
         max_lr=cfg.training.LEARNING_RATE,
         total_steps=total_steps,
-        pct_start=0.3,  # 前30%的步数用于 warm-up
+        pct_start=0.2,  # 前20%的步数用于 warm-up
         anneal_strategy='linear',
         final_div_factor=cfg.training.LEARNING_RATE / cfg.training.MIN_LR
     )
@@ -272,7 +272,7 @@ def main():
                                        thrust_file=cfg.paths.TRAIN_THRUST_LABELS_FILE,
                                        window_size=cfg.training.WINDOW_SIZE)
     random_seg_plot_path = os.path.join(cfg.paths.SPLITS_DIR, "random_segment_comparison.png")
-    run_random_segment_fit(cfg, model, full_dataset, device, dt=0.5, segment_duration=60,
+    run_random_segment_fit(cfg, model, full_dataset, device, dt=0.11, segment_duration=22,
                            save_path=random_seg_plot_path)
     print(f"随机数据段预测对比图已保存 -> {random_seg_plot_path}")
 

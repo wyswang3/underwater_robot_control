@@ -3,43 +3,53 @@
 """
 utils/predict_and_compare.py
 
-MLP‑based branch:
-  - Load HybridDynamicsModel checkpoint (default from config)
-  - Predict on full PreprocessedDataset
-  - Save 6‑D preds vs true to CSV in splits dir
-  - Produce global fit plot (scatter+histogram) in splits dir
-  - Produce time‑series comparison plot (pred vs true over time)
-
-Usage (defaults):
-    python utils/predict_and_compare.py
-Or override:
-    python utils/predict_and_compare.py \
-      -c path/to/model.pt \
-      -o path/to/pred_vs_true.csv \
-      -v path/to/global_fit.png \
-      -t path/to/time_series.png
+Pipeline:
+  1) Load HybridDynamicsModel checkpoint
+  2) Predict on full PreprocessedDataset
+  3) Save 6-D preds vs true to CSV
+  4) Produce global fit plot (scatter+histogram)
+  5) Produce time-series comparison plot
+  6) Produce random-segment fit analysis & plot
+  7) Produce error-histograms
 """
 
 import os
 import argparse
+import logging
 
 import torch
 import numpy as np
 import pandas as pd
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 from config import Config
 from models.dynamics_net import EnhancedPhysicsNet, DirectMappingNet, HybridDynamicsModel
 from utils.preprocessing import load_thrust_allocation_matrix
 from utils.dataset import PreprocessedDataset
-from utils.visualization import visualize_global_accuracy,visualize_error_histograms,visualize_time_series
+from utils.visualization import (
+    visualize_global_accuracy,
+    visualize_time_series,
+    visualize_error_histograms
+)
+from utils.random_segment_fit_utils import run_random_segment_fit
 
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%H:%M:%S"
+)
+logger = logging.getLogger(__name__)
 
+# -----------------------------------------------------------------------------
+# Core Functions
+# -----------------------------------------------------------------------------
 def load_model(cfg: Config, checkpoint: str, device: torch.device) -> torch.nn.Module:
-    """
-    构建 MLP‑based 强物理网络 + e2e 网络，然后加载 checkpoint。
-    """
+    """Build and load the HybridDynamicsModel from checkpoint."""
     T_np = load_thrust_allocation_matrix(cfg.paths.THRUST_MATRIX_FILE)
     T = torch.tensor(T_np, dtype=torch.float32, device=device)
 
@@ -48,7 +58,6 @@ def load_model(cfg: Config, checkpoint: str, device: torch.device) -> torch.nn.M
         window_size=cfg.training.WINDOW_SIZE,
         hidden_dim=cfg.training.PHYSICS_HIDDEN_DIM
     ).to(device)
-
     e2e = DirectMappingNet(
         window_size=cfg.training.WINDOW_SIZE,
         hidden_dim=cfg.training.E2E_HIDDEN_DIM
@@ -58,9 +67,8 @@ def load_model(cfg: Config, checkpoint: str, device: torch.device) -> torch.nn.M
     state = torch.load(checkpoint, map_location=device)
     model.load_state_dict(state)
     model.eval()
-    print(f">> Loaded checkpoint: {checkpoint}")
+    logger.info("Loaded checkpoint: %s", checkpoint)
     return model
-
 
 def predict_all(model: torch.nn.Module,
                 loader: DataLoader,
@@ -74,7 +82,8 @@ def predict_all(model: torch.nn.Module,
     all_preds, all_tgts = [], []
     model.eval()
     with torch.no_grad():
-        for batch in loader:
+        for batch in tqdm(loader, desc="Predicting", unit="batch"):
+            # move all tensors in batch to device
             for k, v in batch.items():
                 if torch.is_tensor(v):
                     batch[k] = v.to(device)
@@ -85,24 +94,23 @@ def predict_all(model: torch.nn.Module,
 
     preds = np.vstack(all_preds)
     tgts  = np.vstack(all_tgts)
+    logger.info("Finished prediction: %d samples", preds.shape[0])
     return preds, tgts
 
-
-def save_to_csv(preds: np.ndarray,
-                tgts: np.ndarray,
-                save_path: str) -> None:
-    """
-    Save predictions vs ground truth into a CSV file:
-    columns: pred_0,...,pred_5, true_0,...,true_5
-    """
+def save_to_csv(preds: np.ndarray, tgts: np.ndarray, save_path: str) -> None:
+    """Save predictions vs ground truth into a CSV file."""
     D = preds.shape[1]
     cols = [f'pred_{i}' for i in range(D)] + [f'true_{i}' for i in range(D)]
     df = pd.DataFrame(np.hstack([preds, tgts]), columns=cols)
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     df.to_csv(save_path, index=False)
-    print(f">> Saved CSV: {save_path}")
+    logger.info("Saved CSV: %s", save_path)
 
+# -----------------------------------------------------------------------------
+# Main Pipeline
+# -----------------------------------------------------------------------------
 def main():
+    # --- parse args ---
     cfg = Config()
     device = torch.device(cfg.device.DEVICE if torch.cuda.is_available() else 'cpu')
 
@@ -110,19 +118,20 @@ def main():
     default_csv  = os.path.join(cfg.paths.SPLITS_DIR, 'pred_vs_true.csv')
     default_vis  = os.path.join(cfg.paths.SPLITS_DIR, 'global_fit.png')
     default_ts   = os.path.join(cfg.paths.SPLITS_DIR, 'time_series.png')
+    default_rs   = os.path.join(cfg.paths.SPLITS_DIR, 'random_segment_fit.png')
+    hist_prefix  = os.path.join(cfg.paths.SPLITS_DIR, 'error_hist')
 
-    p = argparse.ArgumentParser(
-        description='Predict, save CSV, visualize global fit and time series'
-    )
-    p.add_argument('-c', '--checkpoint', default=default_ckpt,
-                   help=f'Model checkpoint (.pt), default: {default_ckpt}')
-    p.add_argument('-o', '--out_csv', default=default_csv,
-                   help=f'Output CSV, default: {default_csv}')
-    p.add_argument('-v', '--vis', default=default_vis,
-                   help=f'Global fit plot, default: {default_vis}')
-    p.add_argument('-t', '--time_series', default=default_ts,
-                   help=f'Time series plot, default: {default_ts}')
-    args = p.parse_args()
+    parser = argparse.ArgumentParser(description="Predict, save CSV & visualize")
+    parser.add_argument('-c','--checkpoint',  default=default_ckpt, help="Model checkpoint (.pt)")
+    parser.add_argument('-o','--out_csv',     default=default_csv,  help="Output CSV")
+    parser.add_argument('-v','--vis',         default=default_vis,  help="Global fit plot")
+    parser.add_argument('-t','--time_series', default=default_ts,   help="Time series plot")
+    parser.add_argument('-r','--random_seg',  default=default_rs,   help="Random segment plot")
+    args = parser.parse_args()
+
+    # --- ensure output dirs exist ---
+    for path in [args.out_csv, args.vis, args.time_series, args.random_seg, f"{hist_prefix}_linear.png", f"{hist_prefix}_angular.png"]:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
 
     # 1) load model
     model = load_model(cfg, args.checkpoint, device)
@@ -135,10 +144,12 @@ def main():
         thrust_file=cfg.paths.TRAIN_THRUST_LABELS_FILE,
         window_size=cfg.training.WINDOW_SIZE
     )
-    loader = DataLoader(ds,
-                        batch_size=cfg.training.BATCH_SIZE,
-                        shuffle=False,
-                        num_workers=cfg.training.NUM_WORKERS)
+    loader = DataLoader(
+        ds,
+        batch_size=cfg.training.BATCH_SIZE,
+        shuffle=False,
+        num_workers=cfg.training.NUM_WORKERS
+    )
 
     # 3) predict all
     preds, tgts = predict_all(model, loader, device)
@@ -147,28 +158,44 @@ def main():
     save_to_csv(preds, tgts, args.out_csv)
 
     # 5) visualize global fit
-    os.makedirs(os.path.dirname(args.vis), exist_ok=True)
-    visualize_global_accuracy(model, loader, device,
-                              save_path=args.vis,
-                              max_samples=len(ds))
-    print(f">> Saved global fit plot: {args.vis}")
+    visualize_global_accuracy(
+        model, loader, device,
+        save_path=args.vis,
+        max_samples=len(ds)
+    )
+    logger.info("Saved global fit plot: %s", args.vis)
 
     # 6) visualize time series
-    visualize_time_series(preds, tgts,
-                          time_step=0.2,
-                          save_path=args.time_series)
-    print(f">> Saved time series plot: {args.time_series}")
-    # 生成误差分布直方图
-    hist_prefix = os.path.join(cfg.paths.SPLITS_DIR, "error_hist")
+    visualize_time_series(
+        preds, tgts,
+        time_step=0.2,
+        save_path=args.time_series
+    )
+    logger.info("Saved time series plot: %s", args.time_series)
+
+    # 7) random-segment fit analysis & viz
+      # 使用 cfg, model, ds, device，dt=0.2s，片段总时长30s
+    run_random_segment_fit(
+            cfg = cfg,
+            model = model,
+            dataset = ds,
+            device = device,
+            dt = 0.2,
+            segment_duration = 25,
+            save_path = args.random_seg
+                             )
+    logger.info("Saved random-segment fit plot: %s", args.random_seg)
+
+    # 8) error histograms
     visualize_error_histograms(
         preds, tgts,
         save_prefix=hist_prefix,
-        linear_bins=40,  # 线性误差 10 个箱
-        angular_bins=40,  # 角误差 40 个箱（更细）
+        linear_bins=40,
+        angular_bins=40,
         tick_num=10
     )
-    print(f">> Saved linear-error histogram:  {hist_prefix}_linear.png")
-    print(f">> Saved angular-error histogram: {hist_prefix}_angular.png")
+    logger.info("Saved linear-error histogram:  %s_linear.png", hist_prefix)
+    logger.info("Saved angular-error histogram: %s_angular.png", hist_prefix)
 
 
 if __name__ == '__main__':

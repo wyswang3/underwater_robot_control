@@ -254,7 +254,7 @@ def compute_angular_acceleration(gyro_data, dt):
 # 4) 窗口切分
 ############################
 def create_sequences(df, input_cols, label_cols_acc, label_cols_thrust,
-                     motor_cols, thrust_matrix, window_size=5, step=1, dt=0.1):
+                     motor_cols, thrust_matrix, window_size=9, step=1, dt=0.11):
     logging.debug(f"[DEBUG] 准备进行时间窗口切分: window_size={window_size}, dt={dt}, step={step}")
     feats, accs, thrs, vels, ang_accels = [], [], [], [], []
 
@@ -404,7 +404,7 @@ if __name__=="__main__":
         # 'thrust_matrix_path': os.path.join(PROJECT_ROOT, "data", "raw", "thrust_allocation_matrix.csv"),
         'save_dir'   : os.path.join(PROJECT_ROOT, "data", "processed"),
         'window_size': 9,
-        'dt': 0.11
+        'dt': 0.5
     }
 
     feats, accs, thrs, vels, ang_accels, params = full_pipeline(config)

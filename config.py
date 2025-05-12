@@ -75,13 +75,13 @@ class TrainingConfig:
     MATRIX_DIM: int = 6
     HYDRO_MIN_DIAG: float = 1e-2
     LSTM_DROPOUT: float = 0.2
-    LAYER_DROPOUT: float = 0.4
+    LAYER_DROPOUT: float = 0.3
     RESIDUAL_DROPOUT: float = 0.3
     VELOCITY_HIDDEN: int = 128
 
     # 损失相关参数
     BASE_LOSS_TYPE: str = "mse"
-    LAMBDA_PHY: float = 0.4
+    LAMBDA_PHY: float = 0.5
     BETA_REG: float = 0.1
     LOSS_EPS: float = 1e-6
 
@@ -101,7 +101,7 @@ class TrainingConfig:
     MAX_LR: float = 5e-4
     STEP_PER_BATCH: bool = True      # ★ Poly 需要 batch 级更新
     # Warm up 参数（备用）
-    WARMUP_STEPS: int = 300            # 只在 poly/自定义 Lambda 时读取
+    WARMUP_STEPS: int = 400            # 只在 poly/自定义 Lambda 时读取
 
 # ╭─────────────────────────────╮
 # │ 4. 设备配置                 │

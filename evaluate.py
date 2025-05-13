@@ -1,49 +1,113 @@
 #!/usr/bin/env python
-# evaluate.py
 """
-This module evaluates the hybrid dynamics model.
-If the computed validation loss is NaN, the module falls back to evaluating the model using RMSE.
+evaluate.py
+
+Evaluate script supporting 'pure_lstm', 'direct', and 'hybrid' branches.
+Falls back to RMSE if validation loss returns NaN.
 """
 import os
-import argparse
 import math
-from typing import Union
-
-from utils.log_helper import setup_logging  # Set up logging based on cfg.DEBUG
-
-setup_logging()
-
+import argparse
 import logging
+from typing import Optional
+
 import torch
 from torch.utils.data import DataLoader
 
-# ── Project Modules ────────────────────────────────────────────
 from config import Config
-from models.dynamics_net import (
-    EnhancedPhysicsNet_LSTM,
-    DirectMappingNet_LSTM_Fusion,
-    HybridDynamicsModel,
-    EnhancedDynamicsLoss
-)
 from utils.preprocessing import load_thrust_allocation_matrix
 from utils.dataset import PreprocessedDataset
 from utils.training import validate_model
 
+# Model imports
+from models.pure_lstm_model import PureLSTMNet
+from models.dynamics_net import (
+    DirectMappingNet_LSTM_Fusion,
+    EnhancedPhysicsNet_LSTM,
+    HybridDynamicsModel,
+    EnhancedDynamicsLoss,
+)
+
 logger = logging.getLogger(__name__)
 
 
-def evaluate_model(ckpt: Union[str, os.PathLike]) -> None:
+def build_model_and_criterion(
+    cfg: Config,
+    device: torch.device,
+    thrust_matrix: Optional[torch.Tensor]
+):
     """
-    Evaluate the hybrid dynamics model with the given checkpoint.
+    Instantiate model and corresponding loss criterion based on
+    cfg.training.MODEL_TYPE.
+    """
+    mtype = cfg.training.MODEL_TYPE.replace('-', '_').lower()
 
-    If the computed validation loss is NaN, an alternative RMSE evaluation is performed.
+    if mtype == 'pure_lstm':
+        model = PureLSTMNet(
+            input_size=cfg.training.INPUT_DIM,
+            hidden_size=cfg.training.PURE_LSTM_HIDDEN_DIM,
+            num_layers=cfg.training.PURE_LSTM_LAYERS,
+            dropout=cfg.training.PURE_LSTM_DROPOUT,
+            output_size=cfg.training.PURE_LSTM_OUTPUT_DIM,
+        ).to(device)
+        criterion = torch.nn.MSELoss().to(device)
+        logger.info('Built PureLSTMNet + MSELoss')
+
+    elif mtype == 'direct':
+        model = DirectMappingNet_LSTM_Fusion(
+            hidden=int(cfg.training.HIDDEN_DIM * cfg.training.E2E_HIDDEN_FACTOR),
+            layers=cfg.training.LSTM_LAYERS,
+            fusion_hidden=cfg.training.FUSION_HIDDEN_DIM,
+            debug=cfg.DEBUG
+        ).to(device)
+        criterion = EnhancedDynamicsLoss(
+            beta=cfg.training.LAMBDA_PHY,
+            linear_w=getattr(cfg.training, 'LIN_WEIGHT', 0.7),
+            use_reg=False
+        ).to(device)
+        logger.info('Built DirectMappingNet_LSTM_Fusion + EnhancedDynamicsLoss(use_reg=False)')
+
+    elif mtype == 'hybrid':
+        phys = EnhancedPhysicsNet_LSTM(
+            T=thrust_matrix,
+            hidden=cfg.training.HIDDEN_DIM,
+            layers=cfg.training.LSTM_LAYERS,
+            debug=cfg.DEBUG
+        ).to(device)
+        e2e = DirectMappingNet_LSTM_Fusion(
+            hidden=int(cfg.training.HIDDEN_DIM * cfg.training.E2E_HIDDEN_FACTOR),
+            layers=cfg.training.LSTM_LAYERS,
+            fusion_hidden=cfg.training.FUSION_HIDDEN_DIM,
+            debug=cfg.DEBUG
+        ).to(device)
+        model = HybridDynamicsModel(phys, e2e, debug=cfg.DEBUG).to(device)
+        criterion = EnhancedDynamicsLoss(
+            beta=cfg.training.LAMBDA_PHY,
+            linear_w=getattr(cfg.training, 'LIN_WEIGHT', 0.7),
+            use_reg=True
+        ).to(device)
+        logger.info('Built HybridDynamicsModel + EnhancedDynamicsLoss(use_reg=True)')
+
+    else:
+        raise ValueError(f"Unknown MODEL_TYPE='{cfg.training.MODEL_TYPE}'")
+
+    return model, criterion
+
+
+def evaluate_model(ckpt_path: str) -> None:
     """
+    Load checkpoint and evaluate on validation set.
+    """
+    # Load config and normalize model type
     cfg = Config()
-    device = torch.device(cfg.device.DEVICE if torch.cuda.is_available() else "cpu")
+    cfg.training.MODEL_TYPE = cfg.training.MODEL_TYPE.replace('-', '_').lower()
+
+    # Device
+    device = torch.device(cfg.device.DEVICE if torch.cuda.is_available() else 'cpu')
     logger.info(f"Device: {device}")
 
-    # 1) Load dataset
-    dataset = PreprocessedDataset(
+    # Dataset and loader
+    ds = PreprocessedDataset(
         cfg.paths.TRAIN_FEATURES_FILE,
         cfg.paths.TRAIN_ACCEL_LABELS_FILE,
         cfg.paths.TRAIN_ANGULAR_ACCEL_LABELS_FILE,
@@ -51,83 +115,59 @@ def evaluate_model(ckpt: Union[str, os.PathLike]) -> None:
         window_size=cfg.training.WINDOW_SIZE
     )
     loader = DataLoader(
-        dataset,
+        ds,
         batch_size=cfg.training.BATCH_SIZE,
         shuffle=False,
         num_workers=cfg.training.NUM_WORKERS,
-        pin_memory=(device.type == "cuda")
+        pin_memory=(device.type == 'cuda')
     )
-    logger.info(f"Eval samples: {len(dataset)}")
+    logger.info(f"Eval samples: {len(ds)}")
 
-    # 2) Build model architecture
-    T = torch.tensor(
-        load_thrust_allocation_matrix(cfg.paths.THRUST_MATRIX_FILE),
-        dtype=torch.float32, device=device
-    )
-    physics_net = EnhancedPhysicsNet_LSTM(
-        T=T,  # Use the thrust allocation matrix T
-        hidden=cfg.training.HIDDEN_DIM,
-        layers=cfg.training.LSTM_LAYERS,
-        debug=cfg.DEBUG
-    )
-    e2e_hidden_factor = getattr(cfg.training, "E2E_HIDDEN_FACTOR", 0.5)
-    fusion_hidden_dim = getattr(cfg.training, "FUSION_HIDDEN_DIM", 256)
-    e2e_net = DirectMappingNet_LSTM_Fusion(
-        hidden=int(cfg.training.HIDDEN_DIM * e2e_hidden_factor),
-        layers=cfg.training.LSTM_LAYERS,
-        fusion_hidden=fusion_hidden_dim,
-        debug=cfg.DEBUG
-    ).to(device)
+    # Thrust matrix for physics-based models
+    thrust_matrix: Optional[torch.Tensor] = None
+    if cfg.training.MODEL_TYPE in ('direct', 'hybrid'):
+        arr = load_thrust_allocation_matrix(cfg.paths.THRUST_MATRIX_FILE)
+        thrust_matrix = torch.tensor(arr, dtype=torch.float32, device=device)
+        logger.info(f"Loaded thrust matrix shape: {thrust_matrix.shape}")
 
-    model = HybridDynamicsModel(physics_net, e2e_net, debug=cfg.DEBUG).to(device)
-    logger.info("Model graph built.")
+    # Build model and loss
+    model, criterion = build_model_and_criterion(cfg, device, thrust_matrix)
 
-    # 3) Load checkpoint
-    ckpt = os.fspath(ckpt)
-    if not os.path.isfile(ckpt):
-        logger.error(f"Checkpoint not found: {ckpt}")
+    # Load checkpoint
+    if not os.path.isfile(ckpt_path):
+        logger.error(f"Checkpoint not found: {ckpt_path}")
         return
-    state = torch.load(ckpt, map_location=device)
-    # Check for NaN or Inf in checkpoint values
-    bad = any(torch.isnan(v).any() or torch.isinf(v).any()
-              for v in state.values() if torch.is_tensor(v))
-    if bad:
+    state = torch.load(ckpt_path, map_location=device)
+    # Check for NaN or Inf
+    if any(torch.isnan(v).any() or torch.isinf(v).any() for v in state.values() if torch.is_tensor(v)):
         raise RuntimeError("Checkpoint contains NaN/Inf – abort evaluation.")
     model.load_state_dict(state, strict=True)
-    logger.info(f"Loaded checkpoint: {ckpt}")
+    logger.info(f"Loaded checkpoint: {ckpt_path}")
 
-    # 4) Define loss function
-    criterion = EnhancedDynamicsLoss(
-        beta=cfg.training.LAMBDA_PHY,  # Regularization weight
-        linear_w=getattr(cfg.training, "LIN_WEIGHT", 0.7),
-        use_reg=False
-    ).to(device)
-
-    # 5) Validate the model
-    avg_loss = validate_model(model, criterion, loader, amp_enabled=(device.type == "cuda"))
+    # Validate
+    avg_loss = validate_model(model, criterion, loader, amp_enabled=(device.type=='cuda'))
     if math.isnan(avg_loss):
-        logger.warning("Validation loss returned NaN. Falling back to RMSE evaluation.")
-        # Fallback: aggregate predictions and calculate RMSE as alternative evaluation metric.
+        logger.warning("Validation loss is NaN, falling back to RMSE.")
         from utils.visualization import aggregate_predictions
-        preds, targets = aggregate_predictions(model, loader, device, max_samples=1000)
-        alt_rmse = torch.sqrt(torch.mean((preds - targets) ** 2)).item()
-        logger.info(f"Alternative evaluation (RMSE): {alt_rmse:.6f}")
-        print(f"\nAlternative evaluation (RMSE): {alt_rmse:.6f}")
+        preds, tgts = aggregate_predictions(model, loader, device, max_samples=1000)
+        rmse = torch.sqrt(torch.mean((preds - tgts) ** 2)).item()
+        logger.info(f"RMSE fallback: {rmse:.6f}")
+        print(f"\nRMSE fallback: {rmse:.6f}")
     else:
-        logger.info(f"Evaluation complete — average loss: {avg_loss:.6f}")
-        print(f"\nEvaluation complete — average loss: {avg_loss:.6f}")
+        logger.info(f"Validation complete — average loss: {avg_loss:.6f}")
+        print(f"\nValidation complete — average loss: {avg_loss:.6f}")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate hybrid dynamics model")
+def main():
+    parser = argparse.ArgumentParser(description='Evaluate trained model')
     parser.add_argument(
-        "-c", "--checkpoint",
-        default="models/checkpoints/model.pt",
-        help="Path to checkpoint file"
+        '-c', '--checkpoint',
+        default='models/checkpoints/model.pt',
+        help='Path to checkpoint file'
     )
     args = parser.parse_args()
     evaluate_model(args.checkpoint)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

@@ -404,7 +404,7 @@ if __name__=="__main__":
         # 'thrust_matrix_path': os.path.join(PROJECT_ROOT, "data", "raw", "thrust_allocation_matrix.csv"),
         'save_dir'   : os.path.join(PROJECT_ROOT, "data", "processed"),
         'window_size': 9,
-        'dt': 0.5
+        'dt': 0.11
     }
 
     feats, accs, thrs, vels, ang_accels, params = full_pipeline(config)

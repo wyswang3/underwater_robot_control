@@ -1,23 +1,20 @@
 """Utility functions for training/validation with AMP support (PyTorch >=2.1).
 Safe to import as `from utils.training import *`.
+Supports different loss signatures for pure lstm/mlp (MSELoss) and physics/hybrid (EnhancedDynamicsLoss).
 """
 from __future__ import annotations
 
 import logging
-from contextlib import nullcontext
-from typing import List
-
 import torch
-import torch.nn as nn
-from torch.optim import Optimizer
-from torch.utils.data import DataLoader
-from torch import amp  # PyTorch 2.1+ unified AMP API
+from torch.cuda.amp import autocast, GradScaler
+from typing import Optional
 
+# Setup logger
 logger = logging.getLogger(__name__)
 
-# -----------------------------------------------------------------------------
-# helper ----------------------------------------------------------------------
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# helper ---------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 
 def batch_to_device(obj, device: torch.device):
     """Recursively move *obj* to *device* (non‑blocking when possible)."""
@@ -31,141 +28,148 @@ def batch_to_device(obj, device: torch.device):
 
 
 def process_batch(batch: dict, device: torch.device):
-    """Split a raw batch into (power, imu, target‑dict)."""
+    """Split a raw batch into (power, imu, target_dict)."""
     batch = batch_to_device(batch, device)
-    pw    = batch["power_window"].float()   # (B, win, 8)
-    imu   = batch["imu_window"].float()     # (B, win, 6)
+    pw    = batch["power_window"].float()
+    imu   = batch.get("imu_window")
+    if imu is not None:
+        imu = imu.float()
+    # Build target dict for physics/hybrid loss
     target = {
-        "accel":  batch["accel"].float(),   # (B, 6)
-        "thrust": batch["thrust"].float()   # (B, 8)
+        "accel":  batch["accel"].float(),
+        "thrust": batch.get("thrust_labels", batch.get("thrust")).float()
     }
     return pw, imu, target
 
-# -----------------------------------------------------------------------------
-# training loop ---------------------------------------------------------------
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# training loop --------------------------------------------------------------
+# ----------------------------------------------------------------------------
 
 def train_one_epoch(
-    model: nn.Module,
-    loader: DataLoader,
-    criterion: nn.Module,
-    optimizer: Optimizer,
-    scaler: amp.GradScaler,
-    epoch: int,
-    warmup_steps: int = 0,
-    scheduler: Optimizer | None = None,
-    step_per_batch: bool = False,
-    amp_enabled: bool = True,
-    grad_clip: float | None = None,
+    model,
+    criterion,
+    dataloader,
+    optimizer,
+    scheduler,
+    warmup_steps: int,
+    grad_clip: float,
+    amp_enabled: bool,
+    step_per_batch: bool
 ) -> float:
-    """Run one epoch; return average loss."""
-    device = next(model.parameters()).device
+    """Run one epoch of training and return average loss."""
     model.train()
+    total_loss = 0.0
+    scaler = GradScaler() if amp_enabled else None
 
-    running_loss, seen = 0.0, 0
-    global_step = (epoch - 1) * len(loader)
+    for step, batch in enumerate(dataloader):
+        pw, imu, target = process_batch(batch, next(model.parameters()).device)
 
-    for batch_idx, batch in enumerate(loader, 1):
-        pw, imu, tgt = process_batch(batch, device)
-
-        # warm‑up lr ----------------------------------------------------------------
-        global_step += 1
-        if warmup_steps and global_step <= warmup_steps:
-            warm_ratio = global_step / warmup_steps
-            for group in optimizer.param_groups:
-                group["lr"] = group["initial_lr"] * warm_ratio
-
-        optimizer.zero_grad(set_to_none=True)
-
-        ctx = amp.autocast(device_type="cuda", enabled=amp_enabled) if amp_enabled else nullcontext()
-        with ctx:
-            out   = model(pw, imu)
-            loss  = criterion(out, tgt)
-
-        if not torch.isfinite(loss):
-            logger.warning(f"[Skip] epoch {epoch} batch {batch_idx}: NaN/Inf loss")
-            continue
-        if torch.isnan(loss) or torch.isinf(loss):
-            logger.error(f"[NaN] epoch={epoch} batch={batch_idx}  lr={optimizer.param_groups[0]['lr']:.2e}")
-            for n, p in model.named_parameters():
-                if torch.isnan(p).any() or torch.isinf(p).any():
-                    logger.error(f"  param {n} has NaN/Inf")
-            raise RuntimeError("NaN detected – aborting to keep checkpoint clean")
-
-        # backward ------------------------------------------------------------------
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        if grad_clip is not None:
-            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        scaler.step(optimizer)
-        scaler.update()
+        optimizer.zero_grad()
+        if amp_enabled:
+            with autocast():
+                out = model(pw, imu)
+                # decide loss call signature
+                if isinstance(criterion, torch.nn.MSELoss):
+                    # pure lstm/mlp: out is tensor or dict with accel_pred
+                    pred = out.get('accel_pred', out) if isinstance(out, dict) else out
+                    loss = criterion(pred, target['accel'])
+                else:
+                    # physics/hybrid: criterion expects (out, batch_dict)
+                    loss = criterion(out, target)
+            scaler.scale(loss).backward()
+            if grad_clip:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            out = model(pw, imu)
+            if isinstance(criterion, torch.nn.MSELoss):
+                pred = out.get('accel_pred', out) if isinstance(out, dict) else out
+                loss = criterion(pred, target['accel'])
+            else:
+                loss = criterion(out, target)
+            loss.backward()
+            if grad_clip:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
 
         if scheduler and step_per_batch:
             scheduler.step()
-
-        bs = pw.size(0)
-        running_loss += loss.item() * bs
-        seen += bs
+        total_loss += loss.item()
 
     if scheduler and not step_per_batch:
         scheduler.step()
 
-    return running_loss / max(seen, 1)
+    return total_loss / len(dataloader)
 
 
 def custom_train_model(
-    model: nn.Module,
-    criterion: nn.Module,
-    train_loader: DataLoader,
-    epochs: int,
-    optimizer: Optimizer,
-    scheduler: Optimizer | None = None,
+    model,
+    criterion,
+    train_loader,
+    val_loader: Optional[torch.utils.data.DataLoader] = None,
+    epochs: int = 1,
+    optimizer=None,
+    scheduler=None,
     warmup_steps: int = 0,
-    grad_clip: float | None = None,
-    amp_enabled: bool = True,
-    step_per_batch: bool = False,
-) -> List[float]:
-    """Full training routine; returns list of epoch losses."""
-    scaler = amp.GradScaler(enabled=amp_enabled)
-    history: List[float] = []
-
-    for ep in range(1, epochs + 1):
-        epoch_loss = train_one_epoch(
-            model, train_loader, criterion, optimizer, scaler,
-            ep, warmup_steps, scheduler, step_per_batch, amp_enabled, grad_clip
+    grad_clip: float = 0.0,
+    amp_enabled: bool = False,
+    step_per_batch: bool = False
+) -> dict:
+    """Run full training for multiple epochs, with optional validation.
+    Logs epoch, train loss, and learning rate at INFO level.
+    Returns history with 'train_loss' and 'val_loss'."""
+    history = {'train_loss': [], 'val_loss': []}
+    for epoch in range(1, epochs + 1):
+        train_loss = train_one_epoch(
+            model, criterion, train_loader,
+            optimizer, scheduler, warmup_steps,
+            grad_clip, amp_enabled, step_per_batch
         )
-        history.append(epoch_loss)
-        lr = optimizer.param_groups[0]["lr"]
-        logger.info(f"Epoch[{ep:3d}/{epochs}] train‑loss={epoch_loss:.6f} lr={lr:.2e}")
+        history['train_loss'].append(train_loss)
 
+        lr = optimizer.param_groups[0]['lr']
+        if val_loader is not None:
+            val_loss = validate_model(model, criterion, val_loader, amp_enabled)
+            history['val_loss'].append(val_loss)
+            logger.info(
+                f"Epoch[{epoch:3d}/{epochs}] train-loss={train_loss:.6f} "
+                f"val-loss={val_loss:.6f} lr={lr:.2e}"
+            )
+        else:
+            logger.info(
+                f"Epoch[{epoch:3d}/{epochs}] train-loss={train_loss:.6f} lr={lr:.2e}"
+            )
     return history
 
-# -----------------------------------------------------------------------------
-# validation ------------------------------------------------------------------
-# -----------------------------------------------------------------------------
 
-@torch.no_grad()
 def validate_model(
-    model: nn.Module,
-    criterion: nn.Module,
-    loader: DataLoader,
-    amp_enabled: bool = True,
+    model,
+    criterion,
+    loader,
+    amp_enabled: bool = False
 ) -> float:
-    """Evaluate *model*; return average loss."""
+    """Compute average loss over validation/test loader."""
     model.eval()
-    device = next(model.parameters()).device
-    total, seen = 0.0, 0
-
-    ctx_mgr = amp.autocast(device_type="cuda", enabled=amp_enabled) if amp_enabled else nullcontext()
-
-    for batch in loader:
-        pw, imu, tgt = process_batch(batch, device)
-        with ctx_mgr:
-            loss = criterion(model(pw, imu), tgt)
-        bs = pw.size(0)
-        total += loss.item() * bs
-        seen += bs
-
-    avg_loss = total / max(seen, 1)
-    logger.info(f"[Validate] loss={avg_loss:.6f}")
-    return avg_loss
+    total_loss = 0.0
+    with torch.no_grad():
+        for batch in loader:
+            pw, imu, target = process_batch(batch, next(model.parameters()).device)
+            if amp_enabled:
+                with autocast():
+                    out = model(pw, imu)
+                    if isinstance(criterion, torch.nn.MSELoss):
+                        pred = out.get('accel_pred', out) if isinstance(out, dict) else out
+                        loss = criterion(pred, target['accel'])
+                    else:
+                        loss = criterion(out, target)
+            else:
+                out = model(pw, imu)
+                if isinstance(criterion, torch.nn.MSELoss):
+                    pred = out.get('accel_pred', out) if isinstance(out, dict) else out
+                    loss = criterion(pred, target['accel'])
+                else:
+                    loss = criterion(out, target)
+            total_loss += loss.item()
+    return total_loss / len(loader)

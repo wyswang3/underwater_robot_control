@@ -20,7 +20,7 @@ underwater_robot_control/
 
 # 激活服务器虚拟环境：conda activate /home/furui/pzy/wys_lstm/wyswang3_env
 #conda deactivate
-#git checkout -b motor-reversal-adjustment
+#git checkout -b feature/pure-lstm
 #git status
 #git add .
 #git commit -m "设计了新的模块，用来可视化分析拟合误差"

@@ -7,6 +7,7 @@ from typing import Dict, Any
 # ╭─────────────────────────────╮
 # │ 1. 工具函数                 │
 # ╰─────────────────────────────╯
+
 def _p(*parts) -> Path:
     """跨平台路径拼接（返回 pathlib.Path）。"""
     return Path(*parts).expanduser().resolve()
@@ -23,10 +24,7 @@ def _pretty_dict(d: Dict[str, Any], indent: int = 2) -> str:
 # ╰─────────────────────────────╯
 @dataclass
 class PathsConfig:
-    PROJECT_ROOT: Path = field(
-        default_factory=lambda: _p(__file__).parent
-    )
-    # 以下字段在 __post_init__ 中生成
+    PROJECT_ROOT: Path = field(default_factory=lambda: _p(__file__).parent)
     TRAIN_FEATURES_FILE: Path = field(init=False)
     TRAIN_ACCEL_LABELS_FILE: Path = field(init=False)
     TRAIN_THRUST_LABELS_FILE: Path = field(init=False)
@@ -59,25 +57,35 @@ class PathsConfig:
 # ╰─────────────────────────────╯
 @dataclass
 class TrainingConfig:
+    # 选择模型分支：'hybrid', 'direct', 'pure_lstm'
+    MODEL_TYPE: str = "pure-lstm"
+
     # 数据及模型相关参数
     WINDOW_SIZE: int = 9
     INPUT_DIM: int = 14
+
+    # 通用LSTM参数
     HIDDEN_DIM: int = 1024
     LSTM_LAYERS: int = 1
+    LSTM_DROPOUT: float = 0.2
 
-    # 网络结构参数
-    # 例如混合网络中端到端网络使用的隐藏层数及其融合层尺寸
-    E2E_HIDDEN_FACTOR: float = 0.5      # 例如端到端网络的隐藏层维度为 HIDDEN_DIM * E2E_HIDDEN_FACTOR
-    FUSION_HIDDEN_DIM: int = 512          # 门控融合网络中的隐藏层尺寸
+    # 端到端(Direct)或Hybrid融合参数
+    E2E_HIDDEN_FACTOR: float = 0.5
+    FUSION_HIDDEN_DIM: int = 512
 
-    # 模型相关（针对物理网络等）
+    # 物理网络相关参数
     HYDRO_HIDDEN: int = 256
     MATRIX_DIM: int = 6
     HYDRO_MIN_DIAG: float = 1e-2
-    LSTM_DROPOUT: float = 0.2
-    LAYER_DROPOUT: float = 0.3
-    RESIDUAL_DROPOUT: float = 0.3
-    VELOCITY_HIDDEN: int = 128
+
+    # 纯LSTM网络参数
+    PURE_LSTM_HIDDEN_DIM: int = 400
+    PURE_LSTM_LAYERS: int = 1
+    PURE_LSTM_DROPOUT: float = 0.2
+    PURE_LSTM_OUTPUT_DIM: int = 6
+
+    # MLP网络参数
+    MLP_HIDDEN_DIMS: list = field(default_factory=lambda: [256, 128])
 
     # 损失相关参数
     BASE_LOSS_TYPE: str = "mse"
@@ -86,35 +94,30 @@ class TrainingConfig:
     LOSS_EPS: float = 1e-6
 
     # 训练超参数
-    NUM_EPOCHS: int = 420
+    NUM_EPOCHS: int = 2
     BATCH_SIZE: int = 32
     LEARNING_RATE: float = 1e-4
     WEIGHT_DECAY: float = 1e-4
     CLIP_GRAD_NORM: float = 3.0
     NUM_WORKERS: int = 2
 
-    # Scheduler 参数（这里使用 OneCycleLR）
+    # Learning rate scheduler
     LR_SCHEDULER: bool = True
     LR_SCHEDULER_TYPE: str = "poly"
     LR_SCHEDULER_PCT_START: float = 0.3
     MIN_LR: float = 5e-7
     MAX_LR: float = 5e-4
-    STEP_PER_BATCH: bool = True      # ★ Poly 需要 batch 级更新
-    # Warm up 参数（备用）
-    WARMUP_STEPS: int = 400            # 只在 poly/自定义 Lambda 时读取
+    STEP_PER_BATCH: bool = True
+    WARMUP_STEPS: int = 400
 
 # ╭─────────────────────────────╮
 # │ 4. 设备配置                 │
 # ╰─────────────────────────────╯
 @dataclass
 class DeviceConfig:
-    DEVICE: str = field(
-        default_factory=lambda: (
-            f"cuda:{os.getenv('GPU_ID', 4)}"
-            if torch.cuda.is_available()
-            else "cpu"
-        )
-    )
+    DEVICE: str = field(default_factory=lambda: (
+        f"cuda:{os.getenv('GPU_ID', 0)}" if torch.cuda.is_available() else "cpu"
+    ))
 
 # ╭─────────────────────────────╮
 # │ 5. 主配置                   │

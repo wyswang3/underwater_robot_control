@@ -1,247 +1,259 @@
 #!/usr/bin/env python
-import os, platform, multiprocessing, logging, argparse
-import torch, numpy as np
-from torch.optim.lr_scheduler import (
-    OneCycleLR, CosineAnnealingLR, SequentialLR, LinearLR, LambdaLR
-)
-# ── 项目内部模块 ─────────────────────────────────────────────
+"""
+train.py
+
+Unified training script supporting 'pure_lstm', 'direct', and 'hybrid' branches.
+Features:
+  - Branch selection via config.training.MODEL_TYPE
+  - Optional sliding window override via CLI
+  - Automatic data loading, cleaning, and splitting
+  - Dynamic optimizer & scheduler setup
+  - Structured logging per epoch with LR and losses
+  - Post-training: save checkpoint, plot loss curve, validate, evaluate, visualize
+"""
+import os
+import platform
+import multiprocessing
+import argparse
+import logging
+
+import torch
+import numpy as np
+from torch.optim.lr_scheduler import OneCycleLR, SequentialLR, CosineAnnealingLR, LinearLR, LambdaLR
+
 from config import Config
-from models.dynamics_net import (
-    EnhancedPhysicsNet_LSTM,
-    EnhancedDynamicsLoss,
-    DirectMappingNet_LSTM_Fusion,
-    HybridDynamicsModel
-)
 from utils.preprocessing import load_thrust_allocation_matrix
 from utils.dataset import PreprocessedDataset, check_dataset, split_dataset
-from utils.visualization import plot_loss_curve, visualize_predictions,visualize_overall_accuracy
+from utils.visualization import plot_loss_curve, visualize_predictions, visualize_overall_accuracy
 from utils.random_segment_fit_utils import run_random_segment_fit
 from utils.training import custom_train_model, validate_model
 from evaluate import evaluate_model
 from utils.log_helper import setup_logging
+
+# Model imports
+from models.pure_lstm_model import PureLSTMNet
+from models.dynamics_net import (
+    DirectMappingNet_LSTM_Fusion,
+    EnhancedPhysicsNet_LSTM,
+    HybridDynamicsModel,
+    EnhancedDynamicsLoss,
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
 setup_logging()
-
-import logging
-logger = logging.getLogger(__name__)   # 仅这一行即可
+logger = logging.getLogger(__name__)
 
 
+def make_scheduler(optimizer, cfg, steps_per_epoch):
+    """Create LR scheduler according to config."""
+    stype = cfg.training.LR_SCHEDULER_TYPE.lower()
+    total_steps = cfg.training.NUM_EPOCHS * steps_per_epoch
+    if stype == "onecyclelr":
+        sched = OneCycleLR(
+            optimizer,
+            max_lr=cfg.training.MAX_LR,
+            total_steps=total_steps,
+            pct_start=cfg.training.LR_SCHEDULER_PCT_START,
+            final_div_factor=cfg.training.MAX_LR / cfg.training.MIN_LR,
+        )
+        return sched, True
+    elif stype == "cosine":
+        warm = int(0.1 * cfg.training.NUM_EPOCHS)
+        sched = SequentialLR(
+            optimizer,
+            schedulers=[
+                LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warm),
+                CosineAnnealingLR(optimizer, T_max=cfg.training.NUM_EPOCHS - warm, eta_min=cfg.training.MIN_LR),
+            ],
+            milestones=[warm],
+        )
+        return sched, False
+    else:
+        warm = cfg.training.WARMUP_STEPS or int(0.05 * total_steps)
+        def poly(step):
+            if step < warm:
+                return (step + 1) / warm
+            return (1 - (step - warm) / (total_steps - warm)) ** 2
+        sched = LambdaLR(optimizer, lr_lambda=poly)
+        return sched, True
 
-# ╭──────────────────────────────╮
-# │           主函数             │
-# ╰──────────────────────────────╯
+
+def build_model_and_loss(cfg, device, thrust_matrix=None):
+    """Instantiate model and corresponding loss based on MODEL_TYPE."""
+    mtype = cfg.training.MODEL_TYPE.replace('-', '_').lower()
+    if mtype == 'pure_lstm':
+        model = PureLSTMNet(
+            input_size=cfg.training.INPUT_DIM,
+            hidden_size=cfg.training.PURE_LSTM_HIDDEN_DIM,
+            num_layers=cfg.training.PURE_LSTM_LAYERS,
+            dropout=cfg.training.PURE_LSTM_DROPOUT,
+            output_size=cfg.training.PURE_LSTM_OUTPUT_DIM,
+        ).to(device)
+        criterion = torch.nn.MSELoss().to(device)
+        logger.info('Built PureLSTMNet + MSELoss')
+    elif mtype == 'direct':
+        model = DirectMappingNet_LSTM_Fusion(
+            hidden=int(cfg.training.HIDDEN_DIM * cfg.training.E2E_HIDDEN_FACTOR),
+            layers=cfg.training.LSTM_LAYERS,
+            fusion_hidden=cfg.training.FUSION_HIDDEN_DIM,
+            debug=cfg.DEBUG,
+        ).to(device)
+        criterion = EnhancedDynamicsLoss(
+            beta=cfg.training.LAMBDA_PHY,
+            linear_w=getattr(cfg.training, 'LIN_WEIGHT', 0.7),
+            use_reg=False,
+        ).to(device)
+        logger.info('Built DirectMappingNet_LSTM_Fusion + EnhancedDynamicsLoss(use_reg=False)')
+    elif mtype == 'hybrid':
+        phys = EnhancedPhysicsNet_LSTM(
+            T=thrust_matrix,
+            hidden=cfg.training.HIDDEN_DIM,
+            layers=cfg.training.LSTM_LAYERS,
+            debug=cfg.DEBUG,
+        ).to(device)
+        e2e = DirectMappingNet_LSTM_Fusion(
+            hidden=int(cfg.training.HIDDEN_DIM * cfg.training.E2E_HIDDEN_FACTOR),
+            layers=cfg.training.LSTM_LAYERS,
+            fusion_hidden=cfg.training.FUSION_HIDDEN_DIM,
+            debug=cfg.DEBUG,
+        ).to(device)
+        model = HybridDynamicsModel(phys, e2e, debug=cfg.DEBUG).to(device)
+        criterion = EnhancedDynamicsLoss(
+            beta=cfg.training.LAMBDA_PHY,
+            linear_w=getattr(cfg.training, 'LIN_WEIGHT', 0.7),
+            use_reg=True,
+        ).to(device)
+        logger.info('Built HybridDynamicsModel + EnhancedDynamicsLoss(use_reg=True)')
+    else:
+        raise ValueError(f"Unknown MODEL_TYPE='{cfg.training.MODEL_TYPE}'")
+    return model, criterion
+
+
 def main():
-    # 1) 多进程
-    if platform.system() == "Windows":
-        multiprocessing.set_start_method("spawn", force=True)
+    # Windows multiprocessing safety
+    if platform.system() == 'Windows':
+        multiprocessing.set_start_method('spawn', force=True)
 
-    # 2) 配置 & 随机种子
+    # CLI: only window_size override
+    parser = argparse.ArgumentParser(description='Train network branch')
+    parser.add_argument('--window_size', type=int, help='Override config.training.WINDOW_SIZE')
+    args = parser.parse_args()
+
+    # Config
     cfg = Config()
+    if args.window_size:
+        cfg.training.WINDOW_SIZE = args.window_size
+    # normalize MODEL_TYPE
+    cfg.training.MODEL_TYPE = cfg.training.MODEL_TYPE.replace('-', '_').lower()
     cfg.print_config()
-    torch.manual_seed(42);  np.random.seed(42)
 
-    # 3) 设备
-    device = torch.device(cfg.device.DEVICE if torch.cuda.is_available() else "cpu")
-    if device.type == "cpu":
-        logger.warning("CUDA 不可用，使用 CPU")
-    logger.info(f"Using device: {device}")
+    # Seeds
+    torch.manual_seed(42)
+    np.random.seed(42)
 
-    # 4) 推力矩阵
-    T = torch.tensor(load_thrust_allocation_matrix(cfg.paths.THRUST_MATRIX_FILE),
-                     dtype=torch.float32, device=device)
-    logger.info(f"Thrust‑matrix {T.shape}")
+    # Device
+    device = torch.device(cfg.device.DEVICE if torch.cuda.is_available() else 'cpu')
+    if device.type == 'cpu':
+        logger.warning('CUDA not available, using CPU')
+    logger.info(f'Using device: {device}')
 
-    # 5) 网络 -------------------------------------------------------------
-    physics_net = EnhancedPhysicsNet_LSTM(
-        T=T,  # ← thrust_matrix → T
-        hidden=cfg.training.HIDDEN_DIM,  # ← lstm_hidden_dim → hidden
-        layers=cfg.training.LSTM_LAYERS,  # ← num_layers   → layers
-        debug=cfg.DEBUG
-    ).to(device)
+    # Thrust matrix if needed
+    T = None
+    if cfg.training.MODEL_TYPE in ('direct', 'hybrid'):
+        arr = load_thrust_allocation_matrix(cfg.paths.THRUST_MATRIX_FILE)
+        T = torch.tensor(arr, dtype=torch.float32, device=device)
+        logger.info(f'Loaded thrust matrix: {T.shape}')
 
-    e2e_hidden_factor = getattr(cfg.training, "E2E_HIDDEN_FACTOR", 0.5)
-    fusion_hidden_dim = getattr(cfg.training, "FUSION_HIDDEN_DIM", 256)
+    # Build model + loss
+    model, criterion = build_model_and_loss(cfg, device, T)
 
-    e2e_net = DirectMappingNet_LSTM_Fusion(
-        hidden=int(cfg.training.HIDDEN_DIM * e2e_hidden_factor),
-        layers=cfg.training.LSTM_LAYERS,
-        fusion_hidden=fusion_hidden_dim,
-        debug=cfg.DEBUG
-    ).to(device)
-
-    model = HybridDynamicsModel(physics_net, e2e_net, debug=cfg.DEBUG).to(device)
-    logger.info("Hybrid model ready.")
-
-    # 6) 损失 -------------------------------------------------------------
-    criterion = EnhancedDynamicsLoss(
-        beta=cfg.training.LAMBDA_PHY,  # 正则化权重
-        linear_w=getattr(cfg.training, "LIN_WEIGHT", 0.7),
-        use_reg=True
-    ).to(device)
-
-    # 7) 数据
-    ds_full = PreprocessedDataset(
+    # Data
+    ds = PreprocessedDataset(
         cfg.paths.TRAIN_FEATURES_FILE,
         cfg.paths.TRAIN_ACCEL_LABELS_FILE,
         cfg.paths.TRAIN_ANGULAR_ACCEL_LABELS_FILE,
         cfg.paths.TRAIN_THRUST_LABELS_FILE,
         window_size=cfg.training.WINDOW_SIZE,
-        clean_data=True
+        clean_data=True,
     )
-    check_dataset(ds_full)
-    ds_tr, ds_val = split_dataset(ds_full, 0.8)
-
+    check_dataset(ds)
+    ds_tr, ds_val = split_dataset(ds, 0.8)
     dl_tr = torch.utils.data.DataLoader(
-        ds_tr, batch_size=cfg.training.BATCH_SIZE, shuffle=True,
-        num_workers=cfg.training.NUM_WORKERS, pin_memory=device.type == "cuda")
-    dl_val = torch.utils.data.DataLoader(
-        ds_val, batch_size=cfg.training.BATCH_SIZE, shuffle=False,
-        num_workers=cfg.training.NUM_WORKERS, pin_memory=device.type == "cuda")
-    logger.info("DataLoader ready.")
-
-    # 8) optimizer -----------------------------------------------------------------
-    opt = torch.optim.AdamW(
-        model.parameters(),
-        lr=cfg.training.MAX_LR,  # 初始即 MAX_LR
-        weight_decay=cfg.training.WEIGHT_DECAY,
-        eps=1e-6
+        ds_tr,
+        batch_size=cfg.training.BATCH_SIZE,
+        shuffle=True,
+        num_workers=cfg.training.NUM_WORKERS,
+        pin_memory=(device.type == 'cuda'),
     )
-    for g in opt.param_groups:  # 供 warm‑up 手动调整
-        g["initial_lr"] = g["lr"]
+    dl_val = torch.utils.data.DataLoader(
+        ds_val,
+        batch_size=cfg.training.BATCH_SIZE,
+        shuffle=False,
+        num_workers=cfg.training.NUM_WORKERS,
+        pin_memory=(device.type == 'cuda'),
+    )
+    logger.info('DataLoaders ready')
 
-    # 8.1) scheduler ----------------------------------------------------------------
-    scheduler, step_per_batch = None, False
+    # Optimizer
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=cfg.training.LEARNING_RATE,
+        weight_decay=cfg.training.WEIGHT_DECAY,
+    )
+    for g in optimizer.param_groups:
+        g['initial_lr'] = g['lr']
 
-    if cfg.training.LR_SCHEDULER:
-        sched_type = cfg.training.LR_SCHEDULER_TYPE.lower()
+    # Scheduler
+    scheduler, step_per_batch = make_scheduler(optimizer, cfg, len(dl_tr))
 
-        # ------------------------------------------------------------------ #
-        # 1. OneCycleLR（原方案，保持兼容）                                   #
-        # ------------------------------------------------------------------ #
-        if sched_type == "onecyclelr":
-            total_steps = cfg.training.NUM_EPOCHS * len(dl_tr)
-            scheduler = OneCycleLR(
-                opt,
-                max_lr=cfg.training.MAX_LR,
-                total_steps=total_steps,
-                pct_start=cfg.training.LR_SCHEDULER_PCT_START,
-                anneal_strategy="linear",
-                final_div_factor=cfg.training.MAX_LR / cfg.training.MIN_LR
-            )
-            step_per_batch = True
-            logger.info("OneCycleLR scheduler on.")
-
-        # ------------------------------------------------------------------ #
-        # 2. CosineAnnealingLR + Linear warm‑up（前 10 % epoch 升 LR）        #
-        # ------------------------------------------------------------------ #
-        elif sched_type == "cosine":
-            warm_epochs = int(0.10 * cfg.training.NUM_EPOCHS)  # 10 % warm‑up
-            cosine_epochs = cfg.training.NUM_EPOCHS - warm_epochs
-
-            scheduler = SequentialLR(
-                opt,
-                schedulers=[
-                    # Linear warm‑up from 0.1·MAX_LR → MAX_LR
-                    LinearLR(opt, start_factor=0.1, end_factor=1.0,
-                             total_iters=warm_epochs),
-                    # Cosine decay to MIN_LR
-                    CosineAnnealingLR(opt, T_max=cosine_epochs,
-                                      eta_min=cfg.training.MIN_LR)
-                ],
-                milestones=[warm_epochs]
-            )
-            step_per_batch = False  # 每 epoch 调度
-            logger.info("Warm‑up + CosineAnnealingLR scheduler on.")
-
-        # ------------------------------------------------------------------ #
-        # 3. Polynomial decay (p=2) + batch warm‑up                          #
-        # ------------------------------------------------------------------ #
-        elif sched_type == "poly":
-            total_steps = cfg.training.NUM_EPOCHS * len(dl_tr)
-            warm_steps = cfg.training.WARMUP_STEPS
-            if warm_steps <= 0:  # 若配置为 0 / None
-                warm_steps = int(0.05 * total_steps)  # 5 % total
-            power = 2.0  # (1‑p)^power
-
-            def poly_decay(step: int):
-                if step < warm_steps:  # warm‑up
-                    return (step + 1) / warm_steps
-                progress = (step - warm_steps) / max(1, total_steps - warm_steps)
-                return (1.0 - progress) ** power  # (1‑p)^power
-
-            scheduler = LambdaLR(opt, lr_lambda=poly_decay)
-            step_per_batch = True
-            logger.info(f"Poly decay (power={power}) + warm‑up on. "
-                        f"warm_steps={warm_steps}, total_steps={total_steps}")
-
-        else:
-            logger.warning(f"Unknown LR_SCHEDULER_TYPE='{cfg.training.LR_SCHEDULER_TYPE}', "
-                           "no scheduler used.")
-
-    # 9) 训练
-    logger.info("=== Train ===")
+    # Train
+    logger.info(f"Starting training [{cfg.training.MODEL_TYPE}] on {device}")
     history = custom_train_model(
-        model, criterion, dl_tr,
+        model,
+        criterion,
+        dl_tr,
+        val_loader=dl_val,
         epochs=cfg.training.NUM_EPOCHS,
-        optimizer=opt,
+        optimizer=optimizer,
         scheduler=scheduler,
         warmup_steps=cfg.training.WARMUP_STEPS,
         grad_clip=cfg.training.CLIP_GRAD_NORM,
         amp_enabled=False,
-        step_per_batch=step_per_batch
+        step_per_batch=step_per_batch,
     )
 
-    # 10) 保存
-    ckpt = os.path.join(cfg.paths.MODEL_DIR, "model.pt")
-    os.makedirs(cfg.paths.MODEL_DIR, exist_ok=True)
+    # Save
+    ckpt = os.path.join(cfg.paths.MODEL_DIR, f"model_{cfg.training.MODEL_TYPE}.pt")
     torch.save(model.state_dict(), ckpt)
-    logger.info(f"Checkpoint → {ckpt}")
+    logger.info(f"Checkpoint saved → {ckpt}")
 
-    plot_loss_curve(history,
-        save_path=os.path.join(cfg.paths.SPLITS_DIR, "train_loss.png"))
+    # Loss curve
+    train_l = history['train_loss']
+    val_l = history.get('val_loss') or None
+    plot_loss_curve(
+        train_l,
+        val_losses=val_l,
+        save_path=os.path.join(cfg.paths.SPLITS_DIR, 'loss_curve.png'),
+    )
 
-    # 11) 验证
-    validate_model(model, criterion, dl_val,
-                   amp_enabled=(device.type == "cuda"))
-
-    # 12) 评估脚本
+    # Validate & evaluate
+    validate_model(model, criterion, dl_val, amp_enabled=(device.type == 'cuda'))
     evaluate_model(ckpt)
 
-    # 13) 可视化
-    # Prediction comparison visualization for selected batches:
-    prediction_cmp_path = os.path.join(cfg.paths.SPLITS_DIR, "prediction_comparison.png")
-    visualize_predictions(
-        model,
-        dl_val,  # Use the validation DataLoader directly
-        device,
-        num_batches=2,  # Process the first 2 batches
-        num_samples=6,  # Visualize 6 samples per batch
-        save_path=prediction_cmp_path
-    )
-    print(f"Prediction comparison visualization saved -> {prediction_cmp_path}")
+    # Visualize
+    base = cfg.training.MODEL_TYPE
+    out_dir = cfg.paths.SPLITS_DIR
+    cmp_path = os.path.join(out_dir, f"compare_{base}.png")
+    visualize_predictions(model, dl_val, device, num_batches=2, num_samples=6, save_path=cmp_path)
+    logger.info(f"Saved compare plot → {cmp_path}")
 
-    # Global fitting accuracy visualization:
-    # This function aggregates predictions from up to max_samples samples from the validation set,
-    # and then produces a scatter plot (or subplots for multi-dim outputs) along with a histogram of RMSE distribution.
-    global_accuracy_path = os.path.join(cfg.paths.SPLITS_DIR, "global_fitting_accuracy.png")
-    visualize_overall_accuracy(
-        model,
-        dl_val,
-        device,
-        save_path=global_accuracy_path,
-        max_samples=1000  # You can adjust max_samples as needed
-    )
-    print(f"Global fitting accuracy visualization saved -> {global_accuracy_path}")
+    glob_path = os.path.join(out_dir, f"global_{base}.png")
+    visualize_overall_accuracy(model, dl_val, device, save_path=glob_path, max_samples=1000)
+    logger.info(f"Saved global plot → {glob_path}")
 
-    # 14) 随机片段拟合
-    run_random_segment_fit(
-        cfg,
-        model,
-        ds_full,  # Training or validation dataset object (should support indexing and len())
-        device,
-        dt=0.2,
-        segment_duration=30,
-        save_path=os.path.join(cfg.paths.SPLITS_DIR, "segment_cmp.png")
-    )
+    seg_path = os.path.join(out_dir, f"segment_{base}.png")
+    run_random_segment_fit(cfg, model, ds, device, dt=0.11, segment_duration=30, save_path=seg_path)
+    logger.info(f"Saved segment plot → {seg_path}")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

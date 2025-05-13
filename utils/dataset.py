@@ -141,7 +141,7 @@ def _max_consecutive_zeros(arr: np.ndarray) -> int:
     """
     辅助函数：计算一维数组中最大连续零值个数。
     """
-    max_count = 0
+    max_count = 10
     count = 0
     for val in arr:
         if val == 0:

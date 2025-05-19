@@ -1,6 +1,0 @@
-开始评估……
-评估完成，平均总损失：0.037588
-预测可视化已保存 -> /home/furui/pzy/underwater_robot_control/data/splits/prediction_comparison.png
-每个样本覆盖 2.50s; 将选取 12 个连续样本，总时长约 30.00s.
-选取数据段起始索引：1171
-随机抽取的 30.0s 数据段整体 RMSE: 0.127

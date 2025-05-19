@@ -1,2 +1,0 @@
-MLP每个epoch需要12s
-LSTM每个epoch需要3s

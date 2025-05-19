@@ -1,2 +1,0 @@
-网络结构是github上的a new feature branch,
-https://github.com/wyswang3/underwater_robot_control.git，

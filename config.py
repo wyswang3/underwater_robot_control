@@ -58,7 +58,7 @@ class PathsConfig:
 @dataclass
 class TrainingConfig:
     # 选择模型分支：'hybrid', 'direct', 'pure_lstm'
-    MODEL_TYPE: str = "pure-lstm"
+    MODEL_TYPE: str = "pure_lstm"
 
     # 数据及模型相关参数
     WINDOW_SIZE: int = 9
@@ -79,7 +79,7 @@ class TrainingConfig:
     HYDRO_MIN_DIAG: float = 1e-2
 
     # 纯LSTM网络参数
-    PURE_LSTM_HIDDEN_DIM: int = 400
+    PURE_LSTM_HIDDEN_DIM: int = 512
     PURE_LSTM_LAYERS: int = 1
     PURE_LSTM_DROPOUT: float = 0.2
     PURE_LSTM_OUTPUT_DIM: int = 6
@@ -94,7 +94,7 @@ class TrainingConfig:
     LOSS_EPS: float = 1e-6
 
     # 训练超参数
-    NUM_EPOCHS: int = 2
+    NUM_EPOCHS: int = 260
     BATCH_SIZE: int = 32
     LEARNING_RATE: float = 1e-4
     WEIGHT_DECAY: float = 1e-4

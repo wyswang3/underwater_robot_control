@@ -223,9 +223,9 @@ def main():
     )
 
     # Save
-    ckpt = os.path.join(cfg.paths.MODEL_DIR, f"model_{cfg.training.MODEL_TYPE}.pt")
-    torch.save(model.state_dict(), ckpt)
-    logger.info(f"Checkpoint saved → {ckpt}")
+    ckpt = os.path.join(cfg.paths.MODEL_DIR,f"model_{cfg.training.MODEL_TYPE}_full.pt")
+    torch.save(model, ckpt)  # <-- 直接保存整个 nn.Module
+    logger.info(f"Full model saved → {ckpt}")
 
     # Loss curve
     train_l = history['train_loss']

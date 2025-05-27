@@ -23,5 +23,5 @@ underwater_robot_control/
 #git checkout -b feature/pure-lstm
 #git status
 #git add .
-#git commit -m "设计了新的模块，将训练好的网络模型输出为ONNX格式"
+#git commit -m "调整了网络模型的保存逻辑"
 #git push -u origin feature/pure-lstm

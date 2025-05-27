@@ -79,7 +79,7 @@ class TrainingConfig:
     HYDRO_MIN_DIAG: float = 1e-2
 
     # 纯LSTM网络参数
-    PURE_LSTM_HIDDEN_DIM: int = 512
+    PURE_LSTM_HIDDEN_DIM: int = 1024
     PURE_LSTM_LAYERS: int = 1
     PURE_LSTM_DROPOUT: float = 0.2
     PURE_LSTM_OUTPUT_DIM: int = 6

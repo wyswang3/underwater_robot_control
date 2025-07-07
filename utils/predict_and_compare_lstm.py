@@ -14,6 +14,7 @@ Convenience script supporting pure_lstm, direct, and hybrid models:
   8. Plot error histograms
   9. Generate per-axis error table and time-series plots
 
+新增 USE_CHINESE 开关，可切换中英文注释与字体。
 Usage:
     python utils/predict_and_compare_lstm.py
 Or override with CLI flags.
@@ -25,9 +26,24 @@ import logging
 import torch
 import numpy as np
 import pandas as pd
+import matplotlib
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+# —— 中英文模式开关 ——#
+USE_CHINESE = False  # True: 中文模式；False: English mode
+
+# —— 字体配置 ——#
+if USE_CHINESE:
+    plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.sans-serif'] = ['SimHei','Microsoft YaHei']
+else:
+    plt.rcParams['font.family'] = 'serif'
+    # 先用 Times New Roman，找不到再用 SimHei
+    plt.rcParams['font.serif'] = ['Times New Roman','SimHei']
+plt.rcParams['axes.unicode_minus'] = False
+
 
 from config import Config
 from utils.preprocessing import load_thrust_allocation_matrix
@@ -108,7 +124,7 @@ def predict_all(model: torch.nn.Module, loader: DataLoader, device: torch.device
     preds_list, tgts_list = [], []
     model.eval()
     with torch.no_grad():
-        for batch in tqdm(loader, desc="Predicting"):
+        for batch in tqdm(loader, desc=("预测中" if USE_CHINESE else "Predicting")):
             for k, v in batch.items():
                 if torch.is_tensor(v):
                     batch[k] = v.to(device)
@@ -140,7 +156,7 @@ if __name__ == '__main__':
     device = torch.device(cfg.device.DEVICE if torch.cuda.is_available() else 'cpu')
     logger.info(f"Using device: {device}")
 
-    parser = argparse.ArgumentParser(description="Predict & compare models")
+    parser = argparse.ArgumentParser(description=("预测与比较模型" if USE_CHINESE else "Predict & compare models"))
     parser.add_argument('-c','--checkpoint', default=os.path.join(cfg.paths.MODEL_DIR, f"model_{cfg.training.MODEL_TYPE}.pt"))
     parser.add_argument('-o','--out_csv',     default=os.path.join(cfg.paths.SPLITS_DIR,'pred_vs_true.csv'))
     parser.add_argument('-v','--vis',         default=os.path.join(cfg.paths.SPLITS_DIR,'global_fit.png'))
@@ -181,26 +197,27 @@ if __name__ == '__main__':
     )
     csv_err = os.path.join(cfg.paths.SPLITS_DIR, 'axis_errors.csv')
     df_err.to_csv(csv_err, index=False)
-    logger.info(f"Saved per-axis error table → {csv_err}")
+    logger.info((f"已保存每轴误差表 → {csv_err}" if USE_CHINESE else f"Saved per-axis error table → {csv_err}"))
 
     # Plot error time-series in 3x2 layout
     fig, axes = plt.subplots(3, 2, figsize=(12, 12), sharex=True)
     axes = axes.flatten()
-    axis_names = [
-        'Linear Accel X','Linear Accel Y','Linear Accel Z',
-        'Angular Accel X','Angular Accel Y','Angular Accel Z'
-    ]
+    axis_names = (
+        ['线加速度X','线加速度Y','线加速度Z','角加速度X','角加速度Y','角加速度Z'] if USE_CHINESE else
+        ['Linear Accel X','Linear Accel Y','Linear Accel Z',
+         'Angular Accel X','Angular Accel Y','Angular Accel Z']
+    )
     times = np.arange(len(df_err)) * args.time_step
     for i, ax in enumerate(axes):
         ax.plot(times, df_err.iloc[:, i], linestyle='-', linewidth=1)
-        ax.set_title(f"{axis_names[i]} Error")
-        ax.set_ylabel("Error")
+        ax.set_title(f"{axis_names[i]} {'误差' if USE_CHINESE else 'Error'}")
+        ax.set_ylabel(('误差' if USE_CHINESE else 'Error'))
         ax.grid(True)
         if i >= 4:
-            ax.set_xlabel("Time (s)")
+            ax.set_xlabel(('时间 (s)' if USE_CHINESE else 'Time (s)'))
     plt.tight_layout()
     err_plot = os.path.join(cfg.paths.SPLITS_DIR, 'axis_errors_timeseries.png')
     os.makedirs(os.path.dirname(err_plot), exist_ok=True)
     plt.savefig(err_plot, dpi=300, bbox_inches='tight')
-    logger.info(f"Saved axis-error time series plot → {err_plot}")
+    logger.info((f"已保存轴误差时间序列图 → {err_plot}" if USE_CHINESE else f"Saved axis-error time series plot → {err_plot}"))
     plt.close()

@@ -58,7 +58,7 @@ class PathsConfig:
 @dataclass
 class TrainingConfig:
     # 选择模型分支：'hybrid', 'direct', 'pure_lstm'
-    MODEL_TYPE: str = "pure_lstm"
+    MODEL_TYPE: str = "hybrid"
 
     # 数据及模型相关参数
     WINDOW_SIZE: int = 9
@@ -74,18 +74,18 @@ class TrainingConfig:
     FUSION_HIDDEN_DIM: int = 512
 
     # 物理网络相关参数
-    HYDRO_HIDDEN: int = 256
+    HYDRO_HIDDEN: int = 128
     MATRIX_DIM: int = 6
     HYDRO_MIN_DIAG: float = 1e-2
 
     # 纯LSTM网络参数
-    PURE_LSTM_HIDDEN_DIM: int = 1024
-    PURE_LSTM_LAYERS: int = 1
+    PURE_LSTM_HIDDEN_DIM: int = 512
+    PURE_LSTM_LAYERS: int = 2
     PURE_LSTM_DROPOUT: float = 0.2
     PURE_LSTM_OUTPUT_DIM: int = 6
 
     # MLP网络参数
-    MLP_HIDDEN_DIMS: list = field(default_factory=lambda: [256, 128])
+    #MLP_HIDDEN_DIMS: list = field(default_factory=lambda: [256, 128])
 
     # 损失相关参数
     BASE_LOSS_TYPE: str = "mse"
@@ -94,19 +94,19 @@ class TrainingConfig:
     LOSS_EPS: float = 1e-6
 
     # 训练超参数
-    NUM_EPOCHS: int = 260
+    NUM_EPOCHS: int = 400
     BATCH_SIZE: int = 32
     LEARNING_RATE: float = 1e-4
     WEIGHT_DECAY: float = 1e-4
-    CLIP_GRAD_NORM: float = 3.0
+    CLIP_GRAD_NORM: float = 5.0
     NUM_WORKERS: int = 2
 
     # Learning rate scheduler
     LR_SCHEDULER: bool = True
-    LR_SCHEDULER_TYPE: str = "poly"
+    LR_SCHEDULER_TYPE: str = "polynomial"
     LR_SCHEDULER_PCT_START: float = 0.3
     MIN_LR: float = 5e-7
-    MAX_LR: float = 5e-4
+    MAX_LR: float = 5e-3
     STEP_PER_BATCH: bool = True
     WARMUP_STEPS: int = 400
 
@@ -116,7 +116,7 @@ class TrainingConfig:
 @dataclass
 class DeviceConfig:
     DEVICE: str = field(default_factory=lambda: (
-        f"cuda:{os.getenv('GPU_ID', 0)}" if torch.cuda.is_available() else "cpu"
+        f"cuda:{os.getenv('GPU_ID', 4)}" if torch.cuda.is_available() else "cpu"
     ))
 
 # ╭─────────────────────────────╮

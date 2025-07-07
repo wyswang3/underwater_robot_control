@@ -133,16 +133,46 @@ def evaluate_model(ckpt_path: str) -> None:
     # Build model and loss
     model, criterion = build_model_and_criterion(cfg, device, thrust_matrix)
 
-    # Load checkpoint
+    # ------------------------------------------------------
+    # Load checkpoint  (兼容整体模型  &  state_dict 两种格式)
+    # ------------------------------------------------------
     if not os.path.isfile(ckpt_path):
         logger.error(f"Checkpoint not found: {ckpt_path}")
         return
-    state = torch.load(ckpt_path, map_location=device)
-    # Check for NaN or Inf
-    if any(torch.isnan(v).any() or torch.isinf(v).any() for v in state.values() if torch.is_tensor(v)):
-        raise RuntimeError("Checkpoint contains NaN/Inf – abort evaluation.")
-    model.load_state_dict(state, strict=True)
-    logger.info(f"Loaded checkpoint: {ckpt_path}")
+
+    obj = torch.load(ckpt_path, map_location=device)
+
+    # ——— 情况 1：整体 nn.Module 对象 ————————————————
+    #   • 直接用加载出的模型替代 build_model_and_criterion 里的空壳
+    #   • 仍保留 criterion，用来计算验证损失
+    if isinstance(obj, torch.nn.Module):
+        model = obj.to(device).eval()
+        logger.info(f"Loaded FULL model: {ckpt_path}")
+
+    # ——— 情况 2：state_dict 或包装字典 ——————————————
+    #   • obj 是 dict ⇒ 继续走旧逻辑
+    else:
+        state_dict = None
+
+        # 2-a 纯 state_dict：所有 value 都是张量
+        if isinstance(obj, dict) and all(torch.is_tensor(v) for v in obj.values()):
+            state_dict = obj
+
+        # 2-b 自定义包装，如 {'model_state': …}
+        elif isinstance(obj, dict) and 'model_state' in obj:
+            state_dict = obj['model_state']
+
+        else:
+            raise TypeError("Unrecognized checkpoint format")
+
+        # NaN / Inf 检查
+        if any(torch.isnan(v).any() or torch.isinf(v).any()
+               for v in state_dict.values() if torch.is_tensor(v)):
+            raise RuntimeError("Checkpoint contains NaN/Inf – abort evaluation.")
+
+        model.load_state_dict(state_dict, strict=True)
+        logger.info(f"Loaded state_dict: {ckpt_path}")
+
 
     # Validate
     avg_loss = validate_model(model, criterion, loader, amp_enabled=(device.type=='cuda'))

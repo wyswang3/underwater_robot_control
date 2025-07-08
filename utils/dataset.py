@@ -1,183 +1,142 @@
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, random_split
 from utils.log_helper import setup_logging
+
+# Initialize logging
 setup_logging()
-
 import logging
-logger = logging.getLogger(__name__)   # 仅这一行即可
-
+logger = logging.getLogger(__name__)
 
 class PreprocessedDataset(Dataset):
     """
     加载预处理后的 numpy 数据文件，并将平铺的特征向量恢复为原始时间窗口格式。
 
     参数:
-      - features_file: 预处理生成的 features 文件路径，形状 (N, window_size * 14)，
-                       其中 14 = 8 (电机功率) + 6 (IMU 数据)
-      - accel_file: numpy 文件路径，线性加速度标签，形状 (N, 3)
-      - angular_accel_file: numpy 文件路径，角加速度标签，形状 (N, 3)
-      - thrust_file: numpy 文件路径，推力标签，形状 (N, 6)
-      - window_size: 时间窗口大小，与预处理时保持一致
-      - clean_data: 若为 True，则在加载时清除异常样本
-      - accel_threshold: 线性加速度的判断阈值
+      - features_file: numpy 文件路径，shape (N, window_size*14)
+      - accel_file: numpy 文件路径，shape (N,3)
+      - angular_accel_file: numpy 文件路径，shape (N,3)
+      - thrust_file: numpy 文件路径，shape (N,6)
+      - window_size: 时间窗口大小
+      - clean_data: 是否清理异常样本
+      - accel_threshold: 加速度阈值，用于清理
     """
-
     def __init__(self,
-                 features_file: str,
-                 accel_file: str,
-                 angular_accel_file: str,
-                 thrust_file: str,
-                 window_size: int,
-                 clean_data: bool = False,
-                 accel_threshold: float = 1.0):
-        super().__init__()
-        # 加载数据，加入异常检测：检查 NaN 或 Inf
+                 features_file,
+                 accel_file,
+                 angular_accel_file,
+                 thrust_file,
+                 window_size,
+                 clean_data=False,
+                 accel_threshold=1.0):
+        super(PreprocessedDataset, self).__init__()
+        # 加载数据
         self.features = np.load(features_file)
         self.accel = np.load(accel_file)
         self.angular_accel = np.load(angular_accel_file)
         self.thrust = np.load(thrust_file)
 
-        # 检查是否存在 NaN/Inf（可以根据具体需求调整）
-        if np.isnan(self.features).any() or np.isinf(self.features).any():
-            logger.warning("Features 文件中包含 NaN 或 Inf")
-        if np.isnan(self.accel).any() or np.isinf(self.accel).any():
-            logger.warning("Accel 文件中包含 NaN 或 Inf")
-        if np.isnan(self.angular_accel).any() or np.isinf(self.angular_accel).any():
-            logger.warning("Angular accel 文件中包含 NaN 或 Inf")
-        if np.isnan(self.thrust).any() or np.isinf(self.thrust).any():
-            logger.warning("Thrust 文件中包含 NaN 或 Inf")
-
+        # 基本属性
         self.window_size = window_size
-        self.num_features = 14  # 8 (电机功率) + 6 (IMU 数据)
+        self.num_features = 14  # 8 power + 6 IMU
         self.num_samples = self.features.shape[0]
 
+        # 形状校验
+        N = self.num_samples
+        assert self.accel.shape == (N, 3), \
+            f"accel shape mismatch: expected ({N},3), got {self.accel.shape}"
+        assert self.angular_accel.shape == (N, 3), \
+            f"angular_accel shape mismatch: expected ({N},3), got {self.angular_accel.shape}"
+        assert self.thrust.shape == (N, 6), \
+            f"thrust shape mismatch: expected ({N},6), got {self.thrust.shape}"
+
+        # 合并标签
+        self.labels = np.hstack((self.accel, self.angular_accel))  # (N,6)
+
+        # 可选清洗
         if clean_data:
             self._clean_dataset(accel_threshold)
 
-    def __len__(self) -> int:
+    def __len__(self):
         return self.num_samples
 
-    def __getitem__(self, index: int):
-        flat_features = self.features[index]
-        expected_size = self.window_size * self.num_features
-
-        # 检查样本是否为空，以及尺寸是否符合预期
-        if flat_features.size != expected_size:
+    def __getitem__(self, index):
+        flat = self.features[index]
+        expected = self.window_size * self.num_features
+        if flat.size != expected:
             raise ValueError(
-                f"样本 {index} 的特征大小不匹配：期望 {expected_size}，实际 {flat_features.size}"
+                f"样本 {index} 尺寸不符: 期望 {expected}, 实际 {flat.size}"
             )
-        if np.isnan(flat_features).any() or np.isinf(flat_features).any():
-            raise ValueError(f"样本 {index} 包含 NaN 或 Inf 值！")
-
-        # 重塑为 (window_size, num_features)
-        features_reshaped = flat_features.reshape(self.window_size, self.num_features)
-        power_window = torch.from_numpy(features_reshaped[:, :8]).float()  # (window_size, 8)
-        imu_window = torch.from_numpy(features_reshaped[:, 8:]).float()  # (window_size, 6)
-
-        accel_linear = torch.from_numpy(self.accel[index]).float()  # (3,)
-        accel_angular = torch.from_numpy(self.angular_accel[index]).float()  # (3,)
-        accel_combined = torch.cat([accel_linear, accel_angular], dim=0)  # (6,)
-        thrust_tensor = torch.from_numpy(self.thrust[index]).float()  # (6,)
+        # 重塑序列
+        seq = flat.reshape(self.window_size, self.num_features)
+        power = torch.from_numpy(seq[:, :8]).float()    # (W,8)
+        imu   = torch.from_numpy(seq[:, 8:]).float()     # (W,6)
+        accel = torch.from_numpy(self.labels[index]).float()  # (6,)
+        thrust= torch.from_numpy(self.thrust[index]).float() # (6,)
 
         return {
-            'power_window': power_window,
-            'imu_window': imu_window,
-            'accel': accel_combined,
-            'thrust': thrust_tensor
+            'power_window': power,
+            'imu_window': imu,
+            'accel': accel,
+            'thrust': thrust,
         }
 
-    def _clean_dataset(self, accel_threshold: float):
+    def _clean_dataset(self, accel_threshold):
         """
         清理异常样本：
-          - 如果某个样本的特征尺寸不正确或包含 NaN/Inf，则剔除。
-          - 如果某个样本的电机8通道功率数据全为 0，
-            且其对应的线性加速度（accel 标签前3个数值）的范数大于 accel_threshold，
-            则认为该样本异常，需要移除。
+          - 包含 NaN/Inf
+          - 功率全零且线性加速度过大
         """
-        valid_indices = []
-        total = self.num_samples
-        for i in range(total):
-            flat_features = self.features[i]
-            expected_size = self.window_size * self.num_features
+        mask = np.ones(self.num_samples, dtype=bool)
 
-            # 检查尺寸
-            if flat_features.size != expected_size:
-                logger.debug(f"样本 {i} 尺寸不匹配：期望 {expected_size}，实际 {flat_features.size}")
-                continue
+        # 去除 NaN/Inf
+        mask &= ~np.isnan(self.features).any(axis=1)
+        mask &= ~np.isinf(self.features).any(axis=1)
+        mask &= ~np.isnan(self.labels).any(axis=1)
+        mask &= ~np.isinf(self.labels).any(axis=1)
 
-            # 检查 NaN 或 Inf
-            if np.isnan(flat_features).any() or np.isinf(flat_features).any():
-                logger.debug(f"样本 {i} 包含 NaN 或 Inf，剔除")
-                continue
+        # 检测功率全零样本
+        reshaped = self.features.reshape(-1, self.window_size, self.num_features)
+        # np.isclose then all over axes
+        is_zero = np.isclose(reshaped[:, :, :8], 0, atol=1e-6)
+        power_zero = np.all(is_zero, axis=(1,2))
+        # 高加速度样本
+        lin_norm = np.linalg.norm(self.accel, axis=1)
+        high_accel = lin_norm > accel_threshold
+        # 标记需剔除样本
+        mask &= ~(power_zero & high_accel)
 
-            features_reshaped = flat_features.reshape(self.window_size, self.num_features)
-            power_window = features_reshaped[:, :8]
-            # 如果功率数据全为 0，检测加速度是否异常
-            if np.allclose(power_window, 0, atol=1e-6):
-                accel_linear = self.accel[i]
-                norm_linear = np.linalg.norm(accel_linear)
-                if norm_linear > accel_threshold:
-                    logger.debug(f"样本 {i} 异常：功率全零且加速度范数 {norm_linear} 超过阈值 {accel_threshold}")
-                    continue
+        removed = np.count_nonzero(~mask)
+        logger.info(f"清理异常样本: 移除 {removed}/{self.num_samples} 个样本")
 
-            valid_indices.append(i)
-
-        num_removed = total - len(valid_indices)
-        if num_removed > 0:
-            print(f"清理异常数据：共 {num_removed} 个异常样本被剔除。")
-        else:
-            print("数据清理：未检测到异常样本。")
-
-        # 根据有效索引过滤数据
-        self.features = self.features[valid_indices]
-        self.accel = self.accel[valid_indices]
-        self.angular_accel = self.angular_accel[valid_indices]
-        self.thrust = self.thrust[valid_indices]
-        self.num_samples = len(valid_indices)
-
-
-def _max_consecutive_zeros(arr: np.ndarray) -> int:
-    """
-    辅助函数：计算一维数组中最大连续零值个数。
-    """
-    max_count = 10
-    count = 0
-    for val in arr:
-        if val == 0:
-            count += 1
-            max_count = max(max_count, count)
-        else:
-            count = 0
-    return max_count
+        # 应用掩码更新数据
+        self.features = self.features[mask]
+        self.labels = self.labels[mask]
+        self.accel = self.accel[mask]
+        self.angular_accel = self.angular_accel[mask]
+        self.thrust = self.thrust[mask]
+        self.num_samples = self.features.shape[0]
 
 
 def split_dataset(dataset, ratio=0.8):
-    """按给定的 ratio 拆分数据集为训练集和验证集。"""
-    n = len(dataset)
-    n_train = int(n * ratio)
-    n_val = n - n_train
-    return torch.utils.data.random_split(dataset, [n_train, n_val])
+    """按比例拆分为训练集和验证集"""
+    N = len(dataset)
+    train_n = int(N * ratio)
+    val_n = N - train_n
+    return random_split(dataset, [train_n, val_n])
 
 
-def check_dataset(dataset: Dataset, accel_threshold: float = 1):
-    """
-    检查数据集中是否存在异常样本：
-      - 若电机8通道功率数据全为 0，且对应的加速度（前3个值）的范数超过 accel_threshold，则视为异常。
-    """
-    problematic_samples = []
-    num_samples = len(dataset)
-    for i in range(num_samples):
-        sample = dataset[i]
-        power_data = sample['power_window'].numpy()  # shape: (window_size, 8)
-        if np.allclose(power_data, 0, atol=1e-6):
-            accel_data = sample['accel'].numpy()  # shape: (6,)
-            norm_linear = np.linalg.norm(accel_data[:3])
-            if norm_linear > accel_threshold:
-                problematic_samples.append((i, norm_linear))
-    if problematic_samples:
-        print(f"警告: 检测到 {len(problematic_samples)} 个异常样本:")
-       # for idx, norm_val in problematic_samples:
-          #  print(f"  样本 {idx}: 线性加速度范数为 {norm_val:.3f} (阈值 {accel_threshold})")
+def check_dataset(dataset, accel_threshold=1.0):
+    """检查异常样本并打印警告"""
+    problems = []
+    for idx in range(len(dataset)):
+        sample = dataset[idx]
+        power = sample['power_window'].numpy()
+        if np.allclose(power, 0, atol=1e-6):
+            lin = sample['accel'].numpy()[:3]
+            if np.linalg.norm(lin) > accel_threshold:
+                problems.append(idx)
+    if problems:
+        logger.warning(f"检测到 {len(problems)} 个异常样本 (功率全零, 高加速度)")
     else:
-        print("数据集检查通过，未发现异常样本。")
+        logger.info("数据集检查通过，无异常样本。")

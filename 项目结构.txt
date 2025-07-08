@@ -23,5 +23,12 @@ underwater_robot_control/
 #git checkout -b feature/pure-lstm
 #git status
 #git add .
-#git commit -m "调整了网络模型的保存逻辑"
+#git commit -m "调整了网络模型的加载预测绘图标注"
 #git push -u origin feature/pure-lstm
+
+设计新的分支：
+git fetch origin                         # 拉取最新远程分支
+git checkout -b feature/pure-lstm-mlp    # 本地新建并切换分支
+git add .                                # 添加所有文件改动
+git commit -m "Refactor dynamics net to use MLP thrust mapping and update dataset/evaluate modules"
+git push --set-upstream origin feature/pure-lstm-mlp
